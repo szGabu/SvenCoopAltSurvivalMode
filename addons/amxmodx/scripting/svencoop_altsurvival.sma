@@ -39,7 +39,7 @@
 #define UNSTUCK_TASKID 					154777
 #define REINFORCEMENT_COOLDOWN_TASKID 	785642
 
-/* Private Data = Update when new version comes. */
+/* Private Data - Update might be required when new version comes. */
 #define m_pPlayer 				420
 #define g_iUnixDiff 			16
 
@@ -98,9 +98,10 @@ new g_iPluginFlags;
 new bool:g_bIsValidReviveBeacon[MAX_PLAYERS+1] = false;
 new g_iRespawnTimeLeft = 0;
 
-new OrpheuFunction:g_hSurvivalActivateNow;
-new OrpheuHook:g_hSurvivalActivateNowHookPre;
+new OrpheuFunction:g_hSurvivalActivateNow, OrpheuFunction:g_hSurvivalToggle;
+new OrpheuHook:g_hSurvivalActivateNowHookPre, OrpheuHook:g_hSurvivalToggleHookPre;
 #pragma unused g_hSurvivalActivateNowHookPre
+#pragma unused g_hSurvivalToggleHookPre
 
 new g_cvarPluginEnabled;
 new g_cvarSurvivalMode;
@@ -135,6 +136,9 @@ public plugin_precache()
 
 	g_hSurvivalActivateNow = OrpheuGetFunction("SC_SurvivalMode_ActivateNow");
 	g_hSurvivalActivateNowHookPre = OrpheuRegisterHook(g_hSurvivalActivateNow, "SurvivalActivateNowPre", OrpheuHookPre);
+
+	g_hSurvivalToggle = OrpheuGetFunction("SC_SurvivalMode_Toggle");
+	g_hSurvivalToggleHookPre = OrpheuRegisterHook(g_hSurvivalToggle, "SurvivalTogglePre", OrpheuHookPre);
 }
 
 /**
@@ -148,7 +152,23 @@ public plugin_precache()
 public OrpheuHookReturn:SurvivalActivateNowPre(ptrThis)
 {
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-        server_print("[DEBUG] svencoop_advsurvival.amxx::SurvivalActivateNowPre() - SurvivalActivateNowPre() called");
+        server_print("[DEBUG] svencoop_advsurvival.amxx::SurvivalActivateNowPre() - Called");
+
+	return OrpheuSupercede;
+}
+
+/**
+ * Hook callback that intercepts and blocks the native survival mode toggle.
+ * Used to implement custom survival mode behavior.
+ *
+ * @param ptrThis Reference pointer from the engine
+ *
+ * @return OrpheuSupercede Prevents the original function from executing
+ */
+public OrpheuHookReturn:SurvivalTogglePre(ptrThis)
+{
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+        server_print("[DEBUG] svencoop_advsurvival.amxx::SurvivalTogglePre() - Called");
 
 	return OrpheuSupercede;
 }
@@ -353,6 +373,8 @@ public SetupNeededEnts()
 
 	g_hGameEndEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, GAMEEND_ENTNAME));
 	set_pev(g_hGameEndEnt, pev_targetname, GAMEEND_TARGETNAME);
+
+	server_print("[NOTICE] %s is free to download and distribute! If you paid for this plugin YOU GOT SCAMMED. Visit https://github.com/szGabu for all my plugins.", PLUGIN_NAME);
 }
 
 /**
@@ -386,7 +408,7 @@ public client_disconnected(iClient)
 		server_print("[DEBUG] svencoop_altsurvival.amxx::client_disconnected() - Called on %N", iClient);
 
 	if(g_bPluginEnabled)
-		Event_PlayerKilled_Post(iClient);
+		RequestFrame("Event_PlayerKilled_Post", iClient);
 }
 
 /**
@@ -484,7 +506,12 @@ CheckReinforcementConditions()
 public Event_PlayerKilled_Post(iClient)
 {
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerKilled_Post() - Called on %N", iClient);
+	{
+		if(is_user_connected(iClient))
+			server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerKilled_Post() - Called on %N", iClient);
+		else
+			server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerKilled_Post() - Called on Player %d (Disconnected)", iClient);
+	}
 
 	if(!g_bPluginEnabled)
 		return HAM_IGNORED;
@@ -616,10 +643,10 @@ public Task_ClockFunction()
 	
 	new sHud[125];
 	if(g_iTimerMode == TIMERMODE_DAMAGE && !g_bDamagedRecently)
-		set_hudmessage(50,135,180,0.5,0.8,0,1.0,2.0,0.0,0.0,10);
+		set_hudmessage(255,0,0,0.5,0.8,0,1.0,2.0,0.0,0.0,10);
 	else 
 	{
-		set_hudmessage(255,0,0,0.5,0.8,0,1.0,2.0,0.0,0.0,10);
+		set_hudmessage(50,135,180,0.5,0.8,0,1.0,2.0,0.0,0.0,10);
 		g_iRespawnTimeLeft--;
 	}
 
@@ -692,12 +719,15 @@ public Event_PlayerSpawn_Post(iClient)
 
 	if(!g_bSurvivalEnabled && GetPlayerCount(0) >= g_iSurvivalMinPlayers)
 	{
-		if(g_iPluginFlags & AMX_FLAG_DEBUG)
-			server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - I want to enable survival mode");
-		new iEnableSurvivalTime = floatround(g_fSurvivalStartDelay);
-		client_print(0, print_chat, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
-		client_print(0, print_center, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
-		set_task(g_fSurvivalStartDelay, "EnableSurvival", ENABLESURV_TASKID);
+		if(!task_exists(ENABLESURV_TASKID))
+		{
+			if(g_iPluginFlags & AMX_FLAG_DEBUG)
+				server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - I want to enable survival mode");
+			new iEnableSurvivalTime = floatround(g_fSurvivalStartDelay);
+			client_print(0, print_chat, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
+			client_print(0, print_center, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
+			set_task(g_fSurvivalStartDelay, "EnableSurvival", ENABLESURV_TASKID);
+		}
 	}
 	else if(!g_bSurvivalEnabled)
 	{
