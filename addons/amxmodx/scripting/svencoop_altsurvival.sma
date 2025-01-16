@@ -268,10 +268,6 @@ public OnConfigsExecuted()
 
 			g_fSurvivalStartDelay = (fNmDelay + 2.0);
 		}
-
-		//hooking cvars in Sven Co-op crashes the game, please do not do this
-		//hook_cvar_change(g_cvarPluginSurvStartDelay, "DelayCvarChange");
-		//hook_cvar_change(g_cvarAntiRushWaitStart, "DelayCvarChange");
 	}
 
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
@@ -279,7 +275,9 @@ public OnConfigsExecuted()
 
 	RegisterHam(Ham_Killed, "player", "Event_PlayerKilled_Post", true);
 
-	register_concmd("amx_respawn", "Command_RespawnDeadPlayers", ADMIN_BAN, "Respawn All Players"); 
+	register_concmd("amx_respawn", "Command_RespawnDeadPlayers", ADMIN_BAN, "Respawns All Players"); 
+
+	register_concmd("amx_survival_activate_now", "Command_SurvivalActivateNow", ADMIN_BAN, "Tries to activate survival mode"); 
 	
 	RegisterHam(Ham_Use, "info_player_start", "Event_SpawnActivation_Post", true);  
 	RegisterHam(Ham_Use, "info_player_deathmatch", "Event_SpawnActivation_Post", true);  
@@ -308,35 +306,6 @@ public OnConfigsExecuted()
 	set_task(1.0, "Task_ClockFunction", _, _, _, "b");
 
 	SetupNeededEnts();
-}
-
-/**
- * Callback for ConVar changes related to survival delay timing.
- *
- * Ensures survival delay is properly synchronized with anti-rush wait time.
- *
- * @param cvarHandle Handle to the ConVar that changed
- * @param szOldValue Previous ConVar value as string
- * @param szNewValue New ConVar value as string
- *
- * @return void
- */
-public DelayCvarChange(cvarHandle, const szOldValue[], const szNewValue[])
-{
-	return;
-	// new Float:fThisDelay = get_pcvar_float(g_cvarPluginSurvStartDelay);
-	// new Float:fNmDelay = get_pcvar_float(g_cvarAntiRushWaitStart);
-
-	// if(g_iPluginFlags & AMX_FLAG_DEBUG)
-	// 	server_print("[DEBUG] svencoop_altsurvival.amxx::DelayCvarChange() - fThisDelay is %f, fNmDelay is %f", fThisDelay, fNmDelay);
-
-	// if(fThisDelay <= fNmDelay)
-	// {
-	// 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-	// 		server_print("[DEBUG] svencoop_altsurvival.amxx::DelayCvarChange() - Native delay less than nextmapper delay, adjusting");
-			
-	// 	g_fSurvivalStartDelay = (fNmDelay + 2.0);
-	// }
 }
 
 /**
@@ -571,18 +540,12 @@ public TriggerVoteEntity()
  *
  * @return void
  */
-public Event_GetPointsForDamage_Post(iMonster, Float:fDamage)
+public Event_GetDamagePoints_Post(iMonster, iAttacker, iInflictor, Float:fDamage)
 {
-	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-	{
-		new szClassName[MAX_NAME_LENGTH];
-		pev(iMonster, pev_classname, szClassName, charsmax(szClassName));
-		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_GetPointsForDamage_Post() - Called on %s (%d)", szClassName, iMonster);
-	}
-
-	if(fDamage > 1.0)
+	if(iAttacker >= 1 && iAttacker <= MaxClients && fDamage > 1.0)
 	{
 		g_bDamagedRecently = true;
+		
 		if(!task_exists(REINFORCEMENT_COOLDOWN_TASKID))
 			set_task(g_fTimerAdvance, "Task_ReinforcementCooldown", REINFORCEMENT_COOLDOWN_TASKID);
 		else
@@ -712,11 +675,26 @@ public ReinforcementsArrived()
 public Event_PlayerSpawn_Post(iClient)
 {
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+	{
 		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - Called on %N", iClient);
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - g_bPluginEnabled is %b", g_bPluginEnabled);
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - g_iSurvivalMode is %d", g_iSurvivalMode);
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - is_user_alive(iClient) is %d", is_user_alive(iClient));
+	}
 
-	if(!g_bPluginEnabled || g_iSurvivalMode == SURVMODE_DISABLED || !is_user_alive(iClient)) //might still call in observer
+	if(!g_bPluginEnabled || g_iSurvivalMode == SURVMODE_DISABLED) //who cares if it's called in observer?
 		return HAM_IGNORED; 
 
+	SurvivalActivateNow();
+
+	if(g_fSpawnProtectionTime > 0.0) 
+		RequestFrame("SpawnProtectEnable", iClient);
+		
+	return HAM_IGNORED;
+}
+
+SurvivalActivateNow()
+{
 	if(!g_bSurvivalEnabled && GetPlayerCount(0) >= g_iSurvivalMinPlayers)
 	{
 		if(!task_exists(ENABLESURV_TASKID))
@@ -725,6 +703,7 @@ public Event_PlayerSpawn_Post(iClient)
 				server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - I want to enable survival mode");
 			new iEnableSurvivalTime = floatround(g_fSurvivalStartDelay);
 			client_print(0, print_chat, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
+			server_print("Enabling survival mode in %d seconds", iEnableSurvivalTime);
 			client_print(0, print_center, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
 			set_task(g_fSurvivalStartDelay, "EnableSurvival", ENABLESURV_TASKID);
 		}
@@ -736,11 +715,6 @@ public Event_PlayerSpawn_Post(iClient)
 		if(task_exists(ENABLESURV_TASKID))
 			remove_task(ENABLESURV_TASKID);
 	}
-
-	if(g_fSpawnProtectionTime > 0.0) 
-		SpawnProtectEnable(iClient);
-		
-	return HAM_IGNORED;
 }
 
 /**
@@ -891,6 +865,17 @@ public Task_UnstuckPlayer(iTaskId)
  */
 public Command_RespawnDeadPlayers(iClient, iLevel, iCommandId)
 {
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+	{
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Command_RespawnDeadPlayers() - Called");
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Command_RespawnDeadPlayers() - iClient is %d", iClient);
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Command_RespawnDeadPlayers() - iLevel is %d", iLevel);
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Command_RespawnDeadPlayers() - iCommandId is %d", iCommandId);
+	}
+
+	if(iClient == 0 || iLevel == -520167424 || iCommandId == 0)
+		return PLUGIN_HANDLED;
+
 	if (!cmd_access(iClient, iLevel, iCommandId, 1))
 		return PLUGIN_HANDLED;
 		
@@ -907,27 +892,36 @@ public Command_RespawnDeadPlayers(iClient, iLevel, iCommandId)
 	return PLUGIN_HANDLED;
 }
 
+public Command_SurvivalActivateNow(iClient, iLevel, iCommandId)
+{
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+	{
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Command_SurvivalActivateNow() - Called");
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Command_SurvivalActivateNow() - iClient is %d", iClient);
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Command_SurvivalActivateNow() - iLevel is %d", iLevel);
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Command_SurvivalActivateNow() - iCommandId is %d", iCommandId);
+	}
+
+	if(iClient == 0 || iLevel == -520167424 || iCommandId == 0)
+		return PLUGIN_HANDLED;
+
+	if (!cmd_access(iClient, iLevel, iCommandId, 1))
+		return PLUGIN_HANDLED;
+
+	SurvivalActivateNow();
+
+	return PLUGIN_HANDLED;
+}
+
 /**
  * Function to respawn all dead players immediately.
  * Triggers respawn entity to handle revival.
  *
- * @return bool Always returns true
+ * @return void
  */
 RespawnAllPlayers()
 {
 	ExecuteHamB(Ham_Use, g_hRespawnEnt, g_hRelayEnt, g_hRelayEnt, 0, 0.0);
-	return true; //future proofing
-	//Testing revealed the below commented didn't properly restore the required ammo for the player
-	//so it's easier for me to just create a native trigger_respawn and triggering it
-	// for(new iClient=1;iClient <= MaxClients;iClient++)
-	// {
-	// 	if(is_user_connected(iClient) && !is_user_alive(iClient))
-	// 	{
-	// 		ExecuteHamB(Ham_SC_PreSpawn, iClient);
-	// 		ExecuteHamB(Ham_Spawn, iClient);
-	// 		ExecuteHamB(Ham_SC_PostSpawn, iClient);
-	// 	}
-	// }
 }
 
 /**
@@ -999,72 +993,72 @@ RegisterMonsterHooks()
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
 		server_print("[DEBUG] svencoop_altsurvival.amxx::RegisterMonsterHooks() - Called");
 
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_alien_babyvoltigore", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_alien_controller", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_alien_grunt", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_alien_slave", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_alien_tor", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_alien_voltigore", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_apache", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_assassin_repel", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_babycrab", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_babygarg", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_barnacle", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_barney", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_bigmomma", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_blkop_osprey", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_blkop_apache", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_bodyguard", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_bullchicken", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_chumtoad", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_cleansuit_scientist", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_cockroach", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_flyer_flock", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_gargantua", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_generic", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_gman", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_gonome", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_grunt_ally_repel", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_grunt_repel", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_handgrenade", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_headcrab", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_houndeye", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_human_assassin", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_human_grunt", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_human_grunt_ally", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_human_grunt_ally_dead", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_human_medic_ally", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_human_torch_ally", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_hwgrunt", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_hwgrunt_repel", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_ichthyosaur", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_kingpin", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_leech", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_male_assassin", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_medic_ally_repel", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_miniturret", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_nihilanth", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_osprey", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_otis", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_otis_dead", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_pitdrone", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_rat", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_robogrunt", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_robogrunt_repel", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_satchel", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_scientist", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_sentry", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_shockroach", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_shocktrooper", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_sitting_scientist", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_snark", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_sqknest", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_stukabat", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_tentacle", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_torch_ally_repel", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_tripmine", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_turret", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_zombie", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_zombie_barney", "Event_GetPointsForDamage_Post", true);
-	RegisterHam(Ham_SC_GetPointsForDamage, "monster_zombie_soldier", "Event_GetPointsForDamage_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_alien_babyvoltigore", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_alien_controller", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_alien_grunt", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_alien_slave", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_alien_tor", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_alien_voltigore", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_apache", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_assassin_repel", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_babycrab", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_babygarg", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_barnacle", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_barney", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_bigmomma", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_blkop_osprey", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_blkop_apache", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_bodyguard", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_bullchicken", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_chumtoad", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_cleansuit_scientist", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_cockroach", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_flyer_flock", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_gargantua", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_generic", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_gman", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_gonome", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_grunt_ally_repel", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_grunt_repel", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_handgrenade", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_headcrab", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_houndeye", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_human_assassin", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_human_grunt", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_human_grunt_ally", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_human_grunt_ally_dead", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_human_medic_ally", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_human_torch_ally", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_hwgrunt", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_hwgrunt_repel", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_ichthyosaur", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_kingpin", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_leech", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_male_assassin", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_medic_ally_repel", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_miniturret", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_nihilanth", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_osprey", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_otis", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_otis_dead", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_pitdrone", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_rat", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_robogrunt", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_robogrunt_repel", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_satchel", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_scientist", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_sentry", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_shockroach", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_shocktrooper", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_sitting_scientist", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_snark", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_sqknest", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_stukabat", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_tentacle", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_torch_ally_repel", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_tripmine", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_turret", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_zombie", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_zombie_barney", "Event_GetDamagePoints_Post", true);
+	RegisterHam(Ham_SC_GetDamagePoints, "monster_zombie_soldier", "Event_GetDamagePoints_Post", true);
 }
