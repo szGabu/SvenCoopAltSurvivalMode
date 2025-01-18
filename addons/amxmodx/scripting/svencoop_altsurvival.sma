@@ -134,15 +134,16 @@ new g_hGameOverEnt     	= 0;
 new g_hRestartEnt     	= 0;
 new g_hGameEndEnt     	= 0;
 
-#define SURVMODE_DISABLED	0
-#define SURVMODE_NORESPAWN	1
-#define SURVMODE_WAVES		2
+#define SURVMODE_DISABLED		0
+#define SURVMODE_NORESPAWN		1
+#define SURVMODE_WAVES			2
 
-#define TIMERMODE_NORMAL	0
-#define TIMERMODE_DAMAGE	1
+#define TIMERMODE_NORMAL		0
+#define TIMERMODE_DAMAGE		1
 
-#define	WAVEMODE_FIXED		0
-#define WAVEMODE_PERPLAYER	1
+#define WAVEMODE_FIXED			0
+#define WAVEMODE_PERPLAYER		1
+#define WAVEMODE_EXPONENTIAL	2
 
 //plugin cvars
 new bool:g_bPluginEnabled;
@@ -153,6 +154,7 @@ new bool:g_bSurvivalActSpawn;
 new g_iTimerMode;
 new Float:g_fTimerAdvance;
 new g_iWaveMode;
+new g_iWaveMinTime;
 new Float:g_fWaveTime;
 new Float:g_fSpawnProtectionTime;
 new g_iSpawnProtectionShellThickness;
@@ -171,6 +173,7 @@ new bool:g_bAllDead = false;
 new bool:g_bDamagedRecently = false;
 new bool:g_bWaveIncoming = false;
 new bool:g_bInfoActivated = false;
+new bool:g_bGameEnded = false;
 new g_iPluginFlags;
 new bool:g_bIsValidReviveBeacon[MAX_PLAYERS+1] = false;
 new g_iRespawnTimeLeft = 0;
@@ -188,6 +191,7 @@ new g_cvarSurvivalActSpawn;
 new g_cvarTimerMode;
 new g_cvarTimerAdvance;
 new g_cvarWaveMode;
+new g_cvarWaveExpMinTime;
 new g_cvarWaveTime;
 new g_cvarSpawnProtectionTime;
 new g_cvarSpawnProtectionShellThickness;
@@ -270,7 +274,8 @@ public plugin_init()
 	g_cvarSurvivalActSpawn = create_cvar("amx_survival_activation_spawn", "1", FCVAR_NONE, "Determines if the plugin should spawn players whenever a spawn point is activated. (Most of the time these represent checkpoints)");
 	g_cvarTimerMode = create_cvar("amx_survival_timer_mode", "1", FCVAR_NONE, "Determines the behavior of the timer when the timer based survival is enabled. 0 = Fixed timer advance. 1 = Timer advances only when dealing damage");
 	g_cvarTimerAdvance = create_cvar("amx_survival_timer_advance", "10.0", FCVAR_NONE, "Determines how much time the timer should advance when dealing damage. Only works with 'amx_survival_timer_mode 2', no effect otherwise");
-	g_cvarWaveMode = create_cvar("amx_survival_wave_mode", "1", FCVAR_NONE, "If we are using the wave mode timer, how should the plugin calculate the time to respawn. 0 = Fixed defined time. 1 = Multiply 'amx_survival_wave_time' value per player.");
+	g_cvarWaveMode = create_cvar("amx_survival_wave_mode", "1", FCVAR_NONE, "If we are using the wave mode timer, how should the plugin calculate the time to respawn. 0 = Fixed defined time. 1 = Multiply 'amx_survival_wave_time' value per player. 2 = Exponential, using 'amx_survival_wave_time', for every player, add half. (starting from the second one)");
+	g_cvarWaveExpMinTime = create_cvar("amx_survival_wave_exponential_min_value", "1", FCVAR_NONE, "When using the exponential method, this determines what should be the minimum value to add to the wave time.");
 	g_cvarWaveTime = create_cvar("amx_survival_wave_time", "25", FCVAR_NONE, "Time to wait before next spawn wave");
 	g_cvarSpawnProtectionTime = create_cvar("amx_survival_sp", "2", FCVAR_NONE, "Determines spawn protection. How much time players should be protected. 0 to disable spawn protection");
 	g_cvarSpawnProtectionShellThickness = create_cvar("amx_survival_sp_shell_thick", "25", FCVAR_NONE, "If players are under the spawn protection effect, how thick should be the visible shield. 0 to disable shield.");
@@ -317,6 +322,7 @@ public plugin_cfg()
 	g_iTimerMode = get_pcvar_num(g_cvarTimerMode);
 	g_fTimerAdvance = get_pcvar_float(g_cvarTimerAdvance);
 	g_iWaveMode = get_pcvar_num(g_cvarWaveMode);
+	g_iWaveMinTime = get_pcvar_num(g_cvarWaveExpMinTime);
 	g_fWaveTime = get_pcvar_float(g_cvarWaveTime);
 	g_fSpawnProtectionTime = get_pcvar_float(g_cvarSpawnProtectionTime);
 	g_iSpawnProtectionShellThickness = get_pcvar_num(g_cvarSpawnProtectionShellThickness);
@@ -351,6 +357,7 @@ public plugin_cfg()
 		server_print("[DEBUG] svencoop_altsurvival.amxx::plugin_cfg() - Hooking Events");
 
 	RegisterHam(Ham_Killed, "player", "Event_PlayerKilled_Post", true);
+	RegisterHam(Ham_Use, "game_end", "Event_GameEnd", false);
 
 	register_concmd("amx_respawn", "Command_RespawnDeadPlayers", ADMIN_BAN, "Respawns All Players"); 
 
@@ -457,6 +464,11 @@ public client_disconnected(iClient)
 		RequestFrame("Event_PlayerKilled_Post", iClient);
 }
 
+public Event_GameEnd()
+{
+	g_bGameEnded = true;
+}
+
 /**
  * Handles preparation for player revival with medkit.
  * Marks the reviving player as being a valid revival beacon.
@@ -522,10 +534,33 @@ CheckReinforcementConditions()
 		{
 			if(!task_exists(INITIALREINF_TASKID))
 			{
-				if(g_iWaveMode == WAVEMODE_FIXED)
-					g_iRespawnTimeLeft = floatround(g_fWaveTime);
-				else
-					g_iRespawnTimeLeft = floatround(g_fWaveTime*(GetPlayerCount(0)));
+				switch(g_iWaveMode)
+				{
+					case WAVEMODE_FIXED:
+					{
+						g_iRespawnTimeLeft = floatround(g_fWaveTime);
+					}
+					case WAVEMODE_PERPLAYER:
+					{
+						g_iRespawnTimeLeft = floatround(g_fWaveTime*(GetPlayerCount(0)));
+					}
+					case WAVEMODE_EXPONENTIAL:
+					{
+						new iPlayerCount = GetPlayerCount(0);
+						new Float:fBaseTime = g_fWaveTime; 
+
+						g_iRespawnTimeLeft = 0;
+						for(new x = 1; x <= iPlayerCount; x++)
+						{
+							g_iRespawnTimeLeft += fBaseTime;
+
+							fBaseTime /= 2; 
+
+							if(fBaseTime < g_iWaveMinTime)
+								fBaseTime = g_iWaveMinTime*1.0; //prevents tag mismatch
+						}
+					}
+				}
 				g_bWaveIncoming = true;
 				set_task(10.0, "CallForReinforcements", INITIALREINF_TASKID);
 			}
@@ -561,7 +596,7 @@ public Event_PlayerKilled_Post(iClient)
 
 	g_bIsValidReviveBeacon[iClient] = false;
 	
-	if(g_bSurvivalEnabled)
+	if(g_bSurvivalEnabled && !g_bGameEnded)
 	{
 		if(g_iPluginFlags & AMX_FLAG_DEBUG)
 			server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerKilled_Post() - Survival is enabled");
@@ -753,15 +788,22 @@ public Event_PlayerSpawn_Post(iClient)
 		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - is_user_alive(iClient) is %d", is_user_alive(iClient));
 	}
 
+	//first spawn always considers player as dead (even in a post hook!)
+	//so, for safety we will execute our logic in the next frame.
+	RequestFrame("Event_PlayerSpawn_Post_FrameNext", iClient);
+}
+
+public Event_PlayerSpawn_Post_FrameNext(iClient)
+{
 	if(!g_bPluginEnabled || g_iSurvivalMode == SURVMODE_DISABLED) //who cares if it's called in observer?
-		return HAM_IGNORED; 
+		return; 
 
 	SurvivalActivateNow();
 
 	if(g_fSpawnProtectionTime > 0.0) 
 		RequestFrame("SpawnProtectEnable", iClient);
 		
-	return HAM_IGNORED;
+	return;
 }
 
 SurvivalActivateNow()
