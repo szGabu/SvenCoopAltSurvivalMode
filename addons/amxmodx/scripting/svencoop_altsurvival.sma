@@ -29,6 +29,8 @@
 #define GAMEEND_ENTNAME					"game_end"
 #define GAMEEND_TARGETNAME				"amxx_sadvsurv_sakuyaizayoi"
 
+#define EMERGENCY_SPAWN_TARGETNAME		"amxx_sadvsurv_rinkaenbyou"
+
 #define RESPAWN_SPAWNFLAG_DEADONLY		2
 #define RESPAWN_SPAWNFLAG_DONTMOVE		4
 
@@ -42,6 +44,9 @@
 /* Private Data - Update might be required when new version comes. */
 #define m_pPlayer 				420
 #define g_iUnixDiff 			16
+
+/* Player Start Spawn Flags */
+#define SF_SPAWN_START_OFF	2
 
 new const Float:g_fSize[][3] = {
 	{0.0, 0.0, 1.0}, {0.0, 0.0, -1.0}, {0.0, 1.0, 0.0}, {0.0, -1.0, 0.0}, {1.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}, {-1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}, {1.0, -1.0, 1.0}, {1.0, 1.0, -1.0}, {-1.0, -1.0, 1.0}, {1.0, -1.0, -1.0}, {-1.0, 1.0, -1.0}, {-1.0, -1.0, -1.0},
@@ -175,8 +180,9 @@ new bool:g_bWaveIncoming = false;
 new bool:g_bInfoActivated = false;
 new bool:g_bGameEnded = false;
 new g_iPluginFlags;
-new bool:g_bIsValidReviveBeacon[MAX_PLAYERS+1] = false;
+new bool:g_bIsValidReviveBeacon[MAX_PLAYERS+1] = { false, ... };
 new g_iRespawnTimeLeft = 0;
+new g_szSpawnPointLastAvailableTargetName[MAX_NAME_LENGTH] = "";
 
 new OrpheuFunction:g_hSurvivalActivateNow, OrpheuFunction:g_hSurvivalToggle;
 new OrpheuHook:g_hSurvivalActivateNowHookPre, OrpheuHook:g_hSurvivalToggleHookPre;
@@ -195,6 +201,9 @@ new g_cvarWaveExpMinTime;
 new g_cvarWaveTime;
 new g_cvarSpawnProtectionTime;
 new g_cvarSpawnProtectionShellThickness;
+
+new Array:g_aAvailableSpawnPoints;
+new bool:g_bEmergencySpawning = false;
 
 /**
  * Called during server/map precache phase to initialize essential plugin components.
@@ -362,11 +371,15 @@ public plugin_cfg()
 	register_concmd("amx_respawn", "Command_RespawnDeadPlayers", ADMIN_BAN, "Respawns All Players"); 
 
 	register_concmd("amx_survival_activate_now", "Command_SurvivalActivateNow", ADMIN_BAN, "Tries to activate survival mode"); 
+
+	RegisterHam(Ham_Use, "info_player_start", "Event_SpawnActivation_Pre", false);  
+	RegisterHam(Ham_Use, "info_player_deathmatch", "Event_SpawnActivation_Pre", false);  
+	RegisterHam(Ham_Use, "info_player_coop", "Event_SpawnActivation_Pre", false);  
 	
 	RegisterHam(Ham_Use, "info_player_start", "Event_SpawnActivation_Post", true);  
 	RegisterHam(Ham_Use, "info_player_deathmatch", "Event_SpawnActivation_Post", true);  
 	RegisterHam(Ham_Use, "info_player_coop", "Event_SpawnActivation_Post", true);  
-	RegisterHam(Ham_Use, "info_player_dm2", "Event_SpawnActivation_Post", true);  
+
 	RegisterHam(Ham_Use, "trigger_respawn", "Event_SpawnActivation_Post", true);  
 	
 	RegisterHam(Ham_SC_EndRevive, "player", "Event_PlayerRevived_Post", true);
@@ -375,6 +388,8 @@ public plugin_cfg()
 	RegisterHam(Ham_Weapon_SecondaryAttack, "weapon_medkit", "Event_PrepareRevive");
 	RegisterHam(Ham_Weapon_RetireWeapon, "weapon_medkit", "Event_RetireMedkit_Post", true);
 
+	//RegisterHam(Ham_SC_PreSpawn, "player", "Event_PlayerPreSpawn_Pre", false);
+	//RegisterHam(Ham_Spawn, "player", "Event_PlayerSpawn_Pre", false);
 	RegisterHam(Ham_Spawn, "player", "Event_PlayerSpawn_Post", true);
 
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
@@ -390,6 +405,100 @@ public plugin_cfg()
 	set_task(1.0, "Task_ClockFunction", _, _, _, "b");
 
 	SetupNeededEnts();
+	MapSpecificFixes();
+	ImSureThereAreSpawns();
+}
+
+MapSpecificFixes()
+{
+	new szMap[MAX_NAME_LENGTH];
+	get_mapname(szMap, charsmax(szMap));
+	if(g_iSurvivalMode == SURVMODE_DISABLED)
+	{
+		if(equali(szMap, "sc_robination_revised"))
+		{
+			// apparently, survival mode wasn't enough for the mapper, there's another game over trigger that
+			// activates if all players are dead, even if survival mode is disabled
+			new iEnt = 0;
+			iEnt = find_ent_by_tname(0, "checknoobs"); //yes, the entity's targetname is called like this
+			if(iEnt)
+				remove_entity(iEnt);
+
+			// this should be the only stepping stone, well, until the map gets updated to completely break 
+			// the plugin's logic but, surely it won't happen, right? :clueless:
+		}
+	}
+}
+
+ImSureThereAreSpawns()
+{
+	// ok, this is how it works, I'm gonna scan all possible spawn points for AVAILABLE spawn points
+	// meaning spawns players can use
+	g_aAvailableSpawnPoints = ArrayCreate();
+
+	//info_player_start
+	//info_player_deathmatch
+	//info_player_coop
+	//info_player_dm2
+
+	new iEnt = 0;
+	while((iEnt = find_ent_by_class(iEnt, "info_player_start")))
+	{
+		if(pev_valid(iEnt) && !(pev(iEnt, pev_spawnflags) & SF_SPAWN_START_OFF))
+		{
+			if(g_iPluginFlags & AMX_FLAG_DEBUG)
+			{
+				server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - Adding %d to possible spawn points.", iEnt);
+				server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - pev(iEnt, pev_spawnflags) %d", pev(iEnt, pev_spawnflags));
+			}
+			ArrayPushCell(g_aAvailableSpawnPoints, iEnt);
+		}
+	}
+
+	iEnt = 0;
+	while((iEnt = find_ent_by_class(iEnt, "info_player_deathmatch")))
+	{
+		if(pev_valid(iEnt) && !(pev(iEnt, pev_spawnflags) & SF_SPAWN_START_OFF))
+		{
+			if(g_iPluginFlags & AMX_FLAG_DEBUG)
+			{
+				server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - Adding %d to possible spawn points.", iEnt);
+				server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - pev(iEnt, pev_spawnflags) %d", pev(iEnt, pev_spawnflags));
+			}
+			ArrayPushCell(g_aAvailableSpawnPoints, iEnt);
+		}
+	}
+
+	iEnt = 0;
+	while((iEnt = find_ent_by_class(iEnt, "info_player_dm2")))
+	{
+		if(pev_valid(iEnt) && !(pev(iEnt, pev_spawnflags) & SF_SPAWN_START_OFF))
+		{
+			if(g_iPluginFlags & AMX_FLAG_DEBUG)
+			{
+				server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - Adding %d to possible spawn points.", iEnt);
+				server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - pev(iEnt, pev_spawnflags) %d", pev(iEnt, pev_spawnflags));
+			}
+			ArrayPushCell(g_aAvailableSpawnPoints, iEnt);
+		}
+	}
+
+	iEnt = 0;
+	while((iEnt = find_ent_by_class(iEnt, "info_player_coop")))
+	{
+		if(pev_valid(iEnt) && !(pev(iEnt, pev_spawnflags) & SF_SPAWN_START_OFF))
+		{
+			if(g_iPluginFlags & AMX_FLAG_DEBUG)
+			{
+				server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - Adding %d to possible spawn points.", iEnt);
+				server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - pev(iEnt, pev_spawnflags) %d", pev(iEnt, pev_spawnflags));
+			}
+			ArrayPushCell(g_aAvailableSpawnPoints, iEnt);
+		}
+	}
+
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+		server_print("[DEBUG] svencoop_altsurvival.amxx::ImSureThereAreSpawns() - We have %d possible spawn points.", ArraySize(g_aAvailableSpawnPoints));
 }
 
 /**
@@ -552,7 +661,7 @@ CheckReinforcementConditions()
 						g_iRespawnTimeLeft = 0;
 						for(new x = 1; x <= iPlayerCount; x++)
 						{
-							g_iRespawnTimeLeft += fBaseTime;
+							g_iRespawnTimeLeft += floatround(fBaseTime);
 
 							fBaseTime /= 2; 
 
@@ -660,6 +769,86 @@ public Event_GetDamagePoints_Post(iMonster, iAttacker, iInflictor, Float:fDamage
 			set_task(g_fTimerAdvance, "Task_ReinforcementCooldown", REINFORCEMENT_COOLDOWN_TASKID);
 		}
 	}
+}
+
+ /**
+ * Pre-hook for spawn point activation. Check if the ent is not in the available spawn points
+ * if it is, it means the spawn point is no longer available
+ *
+ * @return void
+ */
+public Event_SpawnActivation_Pre(iSpawnPoint)
+{
+	new szTargetName[MAX_NAME_LENGTH], szClassName[MAX_NAME_LENGTH];
+	pev(iSpawnPoint, pev_targetname, szTargetName, charsmax(szTargetName));
+	pev(iSpawnPoint, pev_classname, szClassName, charsmax(szClassName));
+
+	if(equali("info_target", szClassName)) //unsure why is it called on this
+		return HAM_IGNORED;
+
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+	{
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_SpawnActivation_Pre() - Called on %d (%s)", iSpawnPoint, szTargetName);
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_SpawnActivation_Pre() - We have %d possible spawn points.", ArraySize(g_aAvailableSpawnPoints));
+	}
+
+	new iSPIndex = ArrayFindValue(g_aAvailableSpawnPoints, iSpawnPoint);
+
+	if(ArrayFindValue(g_aAvailableSpawnPoints, iSpawnPoint) == -1)
+	{
+		if(g_iPluginFlags & AMX_FLAG_DEBUG)
+			server_print("[DEBUG] svencoop_altsurvival.amxx::Event_SpawnActivation_Pre() - %d didn't exist in the spawns, adding it. (it was activated)", iSpawnPoint);
+		ArrayPushCell(g_aAvailableSpawnPoints, iSpawnPoint);
+	}
+	else 
+	{
+		if(g_iPluginFlags & AMX_FLAG_DEBUG)
+			server_print("[DEBUG] svencoop_altsurvival.amxx::Event_SpawnActivation_Pre() - %d existed in spawns, removing it. (it was deactivated)", iSpawnPoint);
+		ArrayDeleteItem(g_aAvailableSpawnPoints, iSPIndex);
+	}
+
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_SpawnActivation_Pre() - We have %d possible spawn points.", ArraySize(g_aAvailableSpawnPoints));
+
+	if(ArraySize(g_aAvailableSpawnPoints) == 0)
+	{
+		//no more spawns
+		//saving last activation to create emergency spawns
+
+		if(g_iPluginFlags & AMX_FLAG_DEBUG)
+			server_print("[DEBUG] svencoop_altsurvival.amxx::Event_SpawnActivation_Pre() - No more spawns, activating emergency spawns.");
+			
+		pev(iSpawnPoint, pev_targetname, g_szSpawnPointLastAvailableTargetName, charsmax(g_szSpawnPointLastAvailableTargetName));
+
+		new iEnt = 0;
+		while((iEnt = find_ent_by_tname(iEnt, g_szSpawnPointLastAvailableTargetName)))
+		{
+			if(pev_valid(iEnt) == 2)
+			{
+				new szClassName[MAX_NAME_LENGTH];
+				pev(iEnt, pev_classname, szClassName, charsmax(szClassName));
+				new Float:fOrigin[3];
+				pev(iEnt, pev_origin, fOrigin);
+				new iEmSpawn = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, szClassName));
+				set_pev(iEmSpawn, pev_origin, fOrigin);
+				set_pev(iEmSpawn, pev_targetname, EMERGENCY_SPAWN_TARGETNAME);
+				dllfunc(DLLFunc_Spawn, iEmSpawn);
+			}
+		}
+
+		g_bEmergencySpawning = true;
+	}
+	else if(g_bEmergencySpawning)
+	{
+		new iEnt = 0;
+		//there are spawns now, and we were using emergency spawning
+		while((iEnt = find_ent_by_tname(iEnt, EMERGENCY_SPAWN_TARGETNAME)))
+			remove_entity(iEnt);
+
+		g_bEmergencySpawning = false;
+	}
+
+	return HAM_IGNORED;
 }
 
  /**
@@ -780,6 +969,7 @@ public ReinforcementsArrived()
  */
 public Event_PlayerSpawn_Post(iClient)
 {
+	server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - Called");
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
 	{
 		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - Called on %N", iClient);
@@ -802,7 +992,7 @@ public Event_PlayerSpawn_Post_FrameNext(iClient)
 
 	if(g_fSpawnProtectionTime > 0.0) 
 		RequestFrame("SpawnProtectEnable", iClient);
-		
+
 	return;
 }
 
@@ -901,7 +1091,7 @@ public Event_PlayerRevived_Post(iClient)
 
 	if(g_fSpawnProtectionTime > 0.0)
 	{
-		if(!task_exists(SPAWN_PROTECT_TASKID+iClient))
+		if(pev_valid(iClient) == 2 && !task_exists(SPAWN_PROTECT_TASKID+iClient))
 		{
 			new Float:fPlayerOrigin[3];
 			new iOther = -1;
@@ -913,7 +1103,8 @@ public Event_PlayerRevived_Post(iClient)
 				|| !g_bIsValidReviveBeacon[iOther]
 				|| pev(iOther, pev_deadflag) & DEAD_DYING
 				|| pev(iOther, pev_deadflag) & DEAD_DEAD
-				|| iOther == iClient)
+				|| iOther == iClient
+				|| pev_valid(iClient) != 2)
 					continue;
 
 				new Float:fOtherOrigin[3];
@@ -940,7 +1131,7 @@ public Event_PlayerRevived_Post(iClient)
 public Task_UnstuckPlayer(iTaskId)
 {
 	new iClient = iTaskId-UNSTUCK_TASKID;
-	if (is_user_connected(iClient) && is_user_alive(iClient)) 
+	if (is_user_connected(iClient) && is_user_alive(iClient) && pev_valid(iClient) == 2) 
 	{
 		static Float:fClientOrigin[3], iHullType;
 		static Float:fClientMins[3];
