@@ -371,14 +371,12 @@ public plugin_cfg()
 	register_concmd("amx_respawn", "Command_RespawnDeadPlayers", ADMIN_BAN, "Respawns All Players"); 
 
 	register_concmd("amx_survival_activate_now", "Command_SurvivalActivateNow", ADMIN_BAN, "Tries to activate survival mode"); 
-
-	RegisterHam(Ham_Use, "info_player_start", "Event_SpawnActivation_Pre", false);  
-	RegisterHam(Ham_Use, "info_player_deathmatch", "Event_SpawnActivation_Pre", false);  
-	RegisterHam(Ham_Use, "info_player_coop", "Event_SpawnActivation_Pre", false);  
+ 
+	RegisterHam(Ham_Use, "info_player_deathmatch", "Event_SpawnActivation_Pre", false); // deathmatch implies dm2 as well
+	RegisterHam(Ham_Use, "info_player_coop", "Event_SpawnActivation_Pre", false); // coop implies start as well
 	
-	RegisterHam(Ham_Use, "info_player_start", "Event_SpawnActivation_Post", true);  
-	RegisterHam(Ham_Use, "info_player_deathmatch", "Event_SpawnActivation_Post", true);  
-	RegisterHam(Ham_Use, "info_player_coop", "Event_SpawnActivation_Post", true);  
+	RegisterHam(Ham_Use, "info_player_deathmatch", "Event_SpawnActivation_Post", true); // ditto
+	RegisterHam(Ham_Use, "info_player_coop", "Event_SpawnActivation_Post", true); // ditto
 
 	RegisterHam(Ham_Use, "trigger_respawn", "Event_SpawnActivation_Post", true);  
 	
@@ -413,20 +411,17 @@ MapSpecificFixes()
 {
 	new szMap[MAX_NAME_LENGTH];
 	get_mapname(szMap, charsmax(szMap));
-	if(g_iSurvivalMode == SURVMODE_DISABLED)
+	if(equali(szMap, "sc_robination_revised"))
 	{
-		if(equali(szMap, "sc_robination_revised"))
-		{
-			// apparently, survival mode wasn't enough for the mapper, there's another game over trigger that
-			// activates if all players are dead, even if survival mode is disabled
-			new iEnt = 0;
-			iEnt = find_ent_by_tname(0, "checknoobs"); //yes, the entity's targetname is called like this
-			if(iEnt)
-				remove_entity(iEnt);
+		// apparently, survival mode wasn't enough for the mapper, there's another game over trigger that
+		// activates if all players are dead, even if survival mode is disabled
+		new iEnt = 0;
+		iEnt = find_ent_by_tname(0, "checknoobs"); //yes, the entity's targetname is called like this
+		if(iEnt)
+			remove_entity(iEnt);
 
-			// this should be the only stepping stone, well, until the map gets updated to completely break 
-			// the plugin's logic but, surely it won't happen, right? :clueless:
-		}
+		// this should be the only stepping stone, well, until the map gets updated to completely break 
+		// the plugin's logic but, surely it won't happen, right? :clueless:
 	}
 }
 
@@ -969,7 +964,6 @@ public ReinforcementsArrived()
  */
 public Event_PlayerSpawn_Post(iClient)
 {
-	server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - Called");
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
 	{
 		server_print("[DEBUG] svencoop_altsurvival.amxx::Event_PlayerSpawn_Post() - Called on %N", iClient);
