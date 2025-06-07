@@ -2,52 +2,73 @@
 #include <amxmisc>
 #include <fakemeta>
 #include <engine>
-#include <orpheu>
 #include <hamsandwich>
 #include <fun>
 
-#pragma semicolon 1
+#pragma semicolon   1
+#pragma dynamic     32768
+
+//RequestFrame does not work properly (https://github.com/alliedmodders/amxmodx/issues/1039) 
+//This is the next best thing, do not blame me
+#define TECHNICAL_IMMEDIATE    			0.1
+
+//tasks
+#define TASKID_ENABLESURVIVAL			878749
+#define TASKID_INITIALREINFORCEMENTS 	485879
+#define TASKID_REINFORCEMENTCOOLDOWN 	785642
+#define TASKID_SPAWNPROTECT 			874298
+#define TASKID_UNSTUCK 					154777
+#define TASKID_CLIENTDISCONNECTED_AFTER 187518
+#define TASKID_CLOCKFUNCTION			781845
+#define TASKID_TRIGGERVOTEENTITY		578875
+#define TASKID_INFOACTIVATEDCOOLDOWN	874187
+#define TASKID_PLAYERSPAWN_POST_AFTER	378487
 
 #define PLUGIN_NAME						"Sven Co-op Alternative Survival Mode Management"
-#define PLUGIN_VERSION					"1.0.0-25w17a"
+#define PLUGIN_VERSION					"RC-25w23a"
 #define PLUGIN_AUTHOR					"szGabu"
 
 #define NATIVE_SURV_STARTING_MSG		"Survival mode starting in "
 
-#define RESPAWN_ENTNAME					"trigger_respawn"
+#define RESPAWN_CLASSNAME				"trigger_respawn"
 #define RESPAWN_TARGETNAME				"amxx_sadvsurv_marisakirisame"
 
-#define RELAY_ENTNAME					"trigger_relay"
+#define RELAY_CLASSNAME					"trigger_relay"
 #define RELAY_TARGETNAME				"amxx_sadvsurv_hakureireimu"
 
-#define GAMEOVER_VOTE_ENTNAME			"trigger_vote"
+#define GAMEOVER_VOTE_CLASSNAME			"trigger_vote"
 #define GAMEOVER_VOTE_TARGETNAME		"amxx_sadvsurv_sanaekochiya"
 
-#define RESTART_ENTNAME					"trigger_vote"
+#define RESTART_CLASSNAME				"trigger_vote"
 #define RESTART_TARGETNAME				"amxx_sadvsurv_cirno"
 
-#define GAMEEND_ENTNAME					"game_end"
+#define GAMEEND_CLASSNAME				"game_end"
 #define GAMEEND_TARGETNAME				"amxx_sadvsurv_sakuyaizayoi"
 
 #define EMERGENCY_SPAWN_TARGETNAME		"amxx_sadvsurv_rinkaenbyou"
 
-#define RESPAWN_SPAWNFLAG_DEADONLY		2
-#define RESPAWN_SPAWNFLAG_DONTMOVE		4
-
-//tasks
-#define CLOCK_TASKID					177784
-#define ENABLESURV_TASKID				878749
-#define INITIALREINF_TASKID 			485879
-#define SPAWN_PROTECT_TASKID 			874298
-#define UNSTUCK_TASKID 					154777
-#define REINFORCEMENT_COOLDOWN_TASKID 	785642
-
-/* Private Data - Update might be required when new version comes. */
-#define m_pPlayer 				420
-#define g_iUnixDiff 			16
+#define SF_RESPAWN_DEADONLY				2
+#define SF_RESPAWN_DONTMOVE				4
 
 /* Player Start Spawn Flags */
-#define SF_SPAWN_START_OFF	2
+#define SF_SPAWN_START_OFF				2
+
+/* Private Data - Update might be required when new version comes. */
+#define m_pPlayer 						420
+#define g_iUnixDiff 					16
+
+#if AMXX_VERSION_NUM < 183
+#define MAX_PLAYERS                 	32
+#define MAX_NAME_LENGTH             	32
+#define MaxClients                  	get_maxplayers()
+#define __BINARY__                  	"svencoop_altsurvival.amxx"
+#define get_pcvar_bool(%1) 	        	(get_pcvar_num(%1) == 1)
+#define set_pcvar_bool(%1) 	        	set_pcvar_num(%1)
+#define find_player_ex(%1)				(find_player(%1))
+#define FindPlayer_MatchUserId			"k"
+#endif
+
+#define IsValidUserIndex(%1)            (1 <= (%1) <= MaxClients)
 
 new const Float:g_fSize[][3] = {
 	{0.0, 0.0, 1.0}, {0.0, 0.0, -1.0}, {0.0, 1.0, 0.0}, {0.0, -1.0, 0.0}, {1.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}, {-1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}, {1.0, -1.0, 1.0}, {1.0, 1.0, -1.0}, {-1.0, -1.0, 1.0}, {1.0, -1.0, -1.0}, {-1.0, 1.0, -1.0}, {-1.0, -1.0, -1.0},
@@ -131,7 +152,7 @@ new const g_szMonsterList[][] = {
 	"monster_turret",
 	"monster_zombie",
 	"monster_zombie_barney",
-	"monster_zombie_soldier",
+	"monster_zombie_soldier"
 };
 
 new g_hRespawnEnt		= 0;
@@ -140,34 +161,22 @@ new g_hGameOverEnt     	= 0;
 new g_hRestartEnt     	= 0;
 new g_hGameEndEnt     	= 0;
 
-#define SURVMODE_DISABLED		0
-#define SURVMODE_NORESPAWN		1
-#define SURVMODE_WAVES			2
+enum {
+	SURVMODE_DISABLED = 0,
+	SURVMODE_NORESPAWN,
+	SURVMODE_WAVES
+};
 
-#define TIMERMODE_NORMAL		0
-#define TIMERMODE_DAMAGE		1
+enum {
+	TIMERMODE_NORMAL = 0,
+	TIMERMODE_DAMAGE
+};
 
-#define WAVEMODE_FIXED			0
-#define WAVEMODE_PERPLAYER		1
-#define WAVEMODE_EXPONENTIAL	2
-
-//plugin cvars
-new bool:g_bPluginEnabled;
-new g_iSurvivalMode;
-new g_iSurvivalMinPlayers;
-new Float:g_fSurvivalStartDelay;
-new bool:g_bSurvivalActSpawn;
-new g_iTimerMode;
-new Float:g_fTimerAdvance;
-new g_iWaveMode;
-new g_iWaveMinTime;
-new Float:g_fWaveTime;
-new Float:g_fSpawnProtectionTime;
-new g_iSpawnProtectionShellThickness;
-
-//native cvars
-new g_cvarObserverMode;
-new g_cvarObserverCyclic;
+enum {
+	WAVEMODE_FIXED = 0,
+	WAVEMODE_PERPLAYER,
+	WAVEMODE_EXPONENTIAL,
+};
 
 //these are used when nextmapper is enabled
 new g_cvarPluginSurvStartDelay;
@@ -183,13 +192,9 @@ new bool:g_bGameEnded = false;
 new g_iPluginFlags;
 new bool:g_bIsValidReviveBeacon[MAX_PLAYERS+1] = { false, ... };
 new g_iRespawnTimeLeft = 0;
-new g_szSpawnPointLastAvailableTargetName[MAX_NAME_LENGTH] = "";
+new g_szSpawnPointLastTargetName[MAX_NAME_LENGTH];
 
-new OrpheuFunction:g_hSurvivalActivateNow, OrpheuFunction:g_hSurvivalToggle;
-new OrpheuHook:g_hSurvivalActivateNowHookPre, OrpheuHook:g_hSurvivalToggleHookPre;
-#pragma unused g_hSurvivalActivateNowHookPre
-#pragma unused g_hSurvivalToggleHookPre
-
+// plugin convars
 new g_cvarPluginEnabled;
 new g_cvarSurvivalMode;
 new g_cvarSurvivalMinPlayers;
@@ -200,69 +205,38 @@ new g_cvarTimerAdvance;
 new g_cvarWaveMode;
 new g_cvarWaveExpMinTime;
 new g_cvarWaveTime;
-new g_cvarSpawnProtectionTime;
-new g_cvarSpawnProtectionShellThickness;
+new g_cvarSpawnProtectTime;
+new g_cvarSpawnProtectShellThick;
 
-new Array:g_aAvailableSpawnPoints;
+//native convars
+new g_cvarNativeSurvMinPlayers;
+new g_cvarNativeSurvMode;
+new g_cvarNativeSurvNextmap;
+new g_cvarNativeSurvRetries;
+new g_cvarNativeSurvStartDelay;
+new g_cvarNativeSurvStartOn;
+new g_cvarNativeSurvSupported;
+new g_cvarNativeSurvVoteAllow;
+
+new g_cvarObserverMode;
+new g_cvarObserverCyclic;
+
+// convar variables
+new bool:g_bPluginEnabled;
+new g_iSurvivalMode;
+new g_iSurvivalMinPlayers;
+new Float:g_fSurvivalStartDelay;
+new bool:g_bSurvivalActSpawn;
+new g_iTimerMode;
+new Float:g_fTimerAdvance;
+new g_iWaveMode;
+new g_iWaveMinTime;
+new Float:g_fWaveTime;
+new Float:g_fSpawnProtectTime;
+new g_iSpawnProtectShellThick;
+
+new Array:g_rgAvailableSpawnPoints;
 new bool:g_bEmergencySpawning = false;
-
-/**
- * Called during server/map precache phase to initialize essential plugin components.
- * Sets up native ConVar pointers and hooks the survival mode activation function.
- * 
- * @return void
- */
-public plugin_precache()
-{
-	g_iPluginFlags = plugin_flags();
-
-	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::plugin_precache() - Called");
-
-	g_cvarObserverMode = get_cvar_pointer("mp_observer_mode");
-	g_cvarObserverCyclic = get_cvar_pointer("mp_observer_cyclic");
-
-	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::plugin_precache() - Pointers Ready");
-
-	g_hSurvivalActivateNow = OrpheuGetFunction("SC_SurvivalMode_ActivateNow");
-	g_hSurvivalActivateNowHookPre = OrpheuRegisterHook(g_hSurvivalActivateNow, "SurvivalActivateNowPre", OrpheuHookPre);
-
-	g_hSurvivalToggle = OrpheuGetFunction("SC_SurvivalMode_Toggle");
-	g_hSurvivalToggleHookPre = OrpheuRegisterHook(g_hSurvivalToggle, "SurvivalTogglePre", OrpheuHookPre);
-}
-
-/**
- * Hook callback that intercepts and blocks the native survival mode activation.
- * Used to implement custom survival mode behavior.
- *
- * @param ptrThis Reference pointer from the engine
- *
- * @return OrpheuSupercede Prevents the original function from executing
- */
-public OrpheuHookReturn:SurvivalActivateNowPre(ptrThis)
-{
-	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-        server_print("[DEBUG] svencoop_advsurvival.amxx::SurvivalActivateNowPre() - Called");
-
-	return OrpheuSupercede;
-}
-
-/**
- * Hook callback that intercepts and blocks the native survival mode toggle.
- * Used to implement custom survival mode behavior.
- *
- * @param ptrThis Reference pointer from the engine
- *
- * @return OrpheuSupercede Prevents the original function from executing
- */
-public OrpheuHookReturn:SurvivalTogglePre(ptrThis)
-{
-	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-        server_print("[DEBUG] svencoop_advsurvival.amxx::SurvivalTogglePre() - Called");
-
-	return OrpheuSupercede;
-}
 
 /**
  * Initializes the plugin, registers commands and creates necessary ConVars.
@@ -273,10 +247,24 @@ public OrpheuHookReturn:SurvivalTogglePre(ptrThis)
 public plugin_init()
 {
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::plugin_init() - Called");
+		server_print("[DEBUG] %s::plugin_init() - Called", __BINARY__);
 
 	register_plugin(PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
 
+	#if AMXX_VERSION_NUM < 183
+	g_cvarPluginEnabled = register_cvar("amx_survival_enabled", "1");
+	g_cvarSurvivalMode = register_cvar("amx_survival_mode", "2");
+	g_cvarSurvivalMinPlayers = register_cvar("amx_survival_min_players", "2");
+	g_cvarSurvivalStartDelay = register_cvar("amx_survival_start_delay", "30");
+	g_cvarSurvivalActSpawn = register_cvar("amx_survival_activation_spawn", "1");
+	g_cvarTimerMode = register_cvar("amx_survival_timer_mode", "1");
+	g_cvarTimerAdvance = register_cvar("amx_survival_timer_advance", "10.0");
+	g_cvarWaveMode = register_cvar("amx_survival_wave_mode", "1");
+	g_cvarWaveExpMinTime = register_cvar("amx_survival_wave_exponential_min_value", "1");
+	g_cvarWaveTime = register_cvar("amx_survival_wave_time", "25");
+	g_cvarSpawnProtectTime = register_cvar("amx_survival_sp", "2");
+	g_cvarSpawnProtectShellThick = register_cvar("amx_survival_sp_shell_thick", "25");
+	#else
 	g_cvarPluginEnabled = create_cvar("amx_survival_enabled", "1", FCVAR_NONE, "Enables the plugin");
 	g_cvarSurvivalMode = create_cvar("amx_survival_mode", "2", FCVAR_NONE, "Determines the mode of survival mode. 0 = Completely disable survival. 1 = Survival enabled, no respawns. 2 = Survival enabled, timer based.");
 	g_cvarSurvivalMinPlayers = create_cvar("amx_survival_min_players", "2", FCVAR_NONE, "Mininum amount of players to enable survival mode. Lowest possible value is 1, to always enable survival mode.");
@@ -287,29 +275,51 @@ public plugin_init()
 	g_cvarWaveMode = create_cvar("amx_survival_wave_mode", "1", FCVAR_NONE, "If we are using the wave mode timer, how should the plugin calculate the time to respawn. 0 = Fixed defined time. 1 = Multiply 'amx_survival_wave_time' value per player. 2 = Exponential, using 'amx_survival_wave_time', for every player, add half. (starting from the second one)");
 	g_cvarWaveExpMinTime = create_cvar("amx_survival_wave_exponential_min_value", "1", FCVAR_NONE, "When using the exponential method, this determines what should be the minimum value to add to the wave time.");
 	g_cvarWaveTime = create_cvar("amx_survival_wave_time", "25", FCVAR_NONE, "Time to wait before next spawn wave");
-	g_cvarSpawnProtectionTime = create_cvar("amx_survival_sp", "2", FCVAR_NONE, "Determines spawn protection. How much time players should be protected. 0 to disable spawn protection");
-	g_cvarSpawnProtectionShellThickness = create_cvar("amx_survival_sp_shell_thick", "25", FCVAR_NONE, "If players are under the spawn protection effect, how thick should be the visible shield. 0 to disable shield.");
-	
+	g_cvarSpawnProtectTime = create_cvar("amx_survival_sp", "2", FCVAR_NONE, "Determines spawn protection. How much time players should be protected. 0 to disable spawn protection");
+	g_cvarSpawnProtectShellThick = create_cvar("amx_survival_sp_shell_thick", "25", FCVAR_NONE, "If players are under the spawn protection effect, how thick should be the visible shield. 0 to disable shield.");
+	#endif
+
+	AutoExecConfig();
+
+	g_iPluginFlags = plugin_flags();
+
+	g_cvarObserverMode = get_cvar_pointer("mp_observer_mode");
+	g_cvarObserverCyclic = get_cvar_pointer("mp_observer_cyclic");
+
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+		server_print("[DEBUG] %s::plugin_init() - Pointers Ready", __BINARY__);
+
 	register_message(get_user_msgid("TextMsg"), "Message_TextMsg");
+
+	DisableNativeSurvival();
 }
 
 public plugin_end()
 {
-	OrpheuUnregisterHook(g_hSurvivalActivateNowHookPre);
-	OrpheuUnregisterHook(g_hSurvivalToggleHookPre);
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+        server_print("[DEBUG] %s.amxx::plugin_end() - Called", __BINARY__);
 
-	if(task_exists(CLOCK_TASKID))
-		remove_task(CLOCK_TASKID);
-	if(task_exists(ENABLESURV_TASKID))
-		remove_task(ENABLESURV_TASKID);
-	if(task_exists(INITIALREINF_TASKID))
-		remove_task(INITIALREINF_TASKID);
-	if(task_exists(SPAWN_PROTECT_TASKID))
-		remove_task(SPAWN_PROTECT_TASKID);
-	if(task_exists(UNSTUCK_TASKID))
-		remove_task(UNSTUCK_TASKID);
-	if(task_exists(REINFORCEMENT_COOLDOWN_TASKID))
-		remove_task(REINFORCEMENT_COOLDOWN_TASKID);
+	if(task_exists(TASKID_ENABLESURVIVAL))
+		remove_task(TASKID_ENABLESURVIVAL);
+	if(task_exists(TASKID_INITIALREINFORCEMENTS))
+		remove_task(TASKID_INITIALREINFORCEMENTS);
+	if(task_exists(TASKID_REINFORCEMENTCOOLDOWN))
+		remove_task(TASKID_REINFORCEMENTCOOLDOWN);
+	if(task_exists(TASKID_SPAWNPROTECT))
+		remove_task(TASKID_SPAWNPROTECT);
+	if(task_exists(TASKID_UNSTUCK))
+		remove_task(TASKID_UNSTUCK);
+	if(task_exists(TASKID_CLOCKFUNCTION))
+		remove_task(TASKID_CLOCKFUNCTION);
+	if(task_exists(TASKID_TRIGGERVOTEENTITY))
+		remove_task(TASKID_TRIGGERVOTEENTITY);
+	if(task_exists(TASKID_INFOACTIVATEDCOOLDOWN))
+		remove_task(TASKID_INFOACTIVATEDCOOLDOWN);
+	if(task_exists(TASKID_PLAYERSPAWN_POST_AFTER))
+		remove_task(TASKID_PLAYERSPAWN_POST_AFTER);
+
+	if(g_iPluginFlags & AMX_FLAG_DEBUG)
+        server_print("[DEBUG] %s.amxx::plugin_end() - Removed Tasks", __BINARY__);
 }
 
 public Message_TextMsg(iMsg, iType, iEntity)
@@ -321,13 +331,34 @@ public Message_TextMsg(iMsg, iType, iEntity)
 		if(containi(szMsg, NATIVE_SURV_STARTING_MSG) == 0)
 		{
 			if(g_iPluginFlags & AMX_FLAG_DEBUG)
-				server_print("[DEBUG] %s::Message_TextMsg() - Server is sending native message");
+				server_print("[DEBUG] %s::Message_TextMsg() - Server is sending native message", __BINARY__);
 
 			return PLUGIN_HANDLED;
 		}
 	}
 
 	return PLUGIN_CONTINUE;
+}
+
+public DisableNativeSurvival()
+{
+	g_cvarNativeSurvMinPlayers = get_cvar_pointer("mp_survival_minplayers");
+	g_cvarNativeSurvMode = get_cvar_pointer("mp_survival_mode");
+	g_cvarNativeSurvNextmap = get_cvar_pointer("mp_survival_nextmap");
+	g_cvarNativeSurvRetries = get_cvar_pointer("mp_survival_retries");
+	g_cvarNativeSurvStartDelay = get_cvar_pointer("mp_survival_startdelay");
+	g_cvarNativeSurvStartOn = get_cvar_pointer("mp_survival_starton");
+	g_cvarNativeSurvSupported = get_cvar_pointer("mp_survival_supported");
+	g_cvarNativeSurvVoteAllow = get_cvar_pointer("mp_survival_voteallow");
+
+	set_pcvar_num(g_cvarNativeSurvMinPlayers, 0);
+	set_pcvar_num(g_cvarNativeSurvMode, 0);
+	set_pcvar_string(g_cvarNativeSurvNextmap, "");
+	set_pcvar_num(g_cvarNativeSurvRetries, 0);
+	set_pcvar_float(g_cvarNativeSurvStartDelay, 0.0);
+	set_pcvar_num(g_cvarNativeSurvStartOn, 0);
+	set_pcvar_num(g_cvarNativeSurvSupported, 0);
+	set_pcvar_num(g_cvarNativeSurvVoteAllow, 0);
 }
 
 /**
@@ -340,28 +371,43 @@ public Message_TextMsg(iMsg, iType, iEntity)
 public plugin_cfg()
 {
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::OnConfigsExecuted() - Called");
+		server_print("[DEBUG] %s::plugin_cfg() - Called", __BINARY__);
 
-	//sadly, we can't bind nor hook because AMXX crashes on Sven Co-op if we do
-	g_bPluginEnabled = get_pcvar_bool(g_cvarPluginEnabled);
+	#if AMXX_VERSION_NUM < 183
+	g_bPluginEnabled = get_pcvar_num(g_cvarPluginEnabled) == 1;
 	g_iSurvivalMode = get_pcvar_num(g_cvarSurvivalMode);
 	g_iSurvivalMinPlayers = get_pcvar_num(g_cvarSurvivalMinPlayers);
 	g_fSurvivalStartDelay = get_pcvar_float(g_cvarSurvivalStartDelay);
-	g_bSurvivalActSpawn = get_pcvar_bool(g_cvarSurvivalActSpawn);
+	g_bSurvivalActSpawn = get_pcvar_num(g_cvarSurvivalActSpawn) == 1;
 	g_iTimerMode = get_pcvar_num(g_cvarTimerMode);
 	g_fTimerAdvance = get_pcvar_float(g_cvarTimerAdvance);
 	g_iWaveMode = get_pcvar_num(g_cvarWaveMode);
 	g_iWaveMinTime = get_pcvar_num(g_cvarWaveExpMinTime);
 	g_fWaveTime = get_pcvar_float(g_cvarWaveTime);
-	g_fSpawnProtectionTime = get_pcvar_float(g_cvarSpawnProtectionTime);
-	g_iSpawnProtectionShellThickness = get_pcvar_num(g_cvarSpawnProtectionShellThickness);
+	g_fSpawnProtectTime = get_pcvar_float(g_cvarSpawnProtectTime);
+	g_iSpawnProtectShellThick = get_pcvar_num(g_cvarSpawnProtectShellThick);
+	#else
+	//future proofing, binding and hooking currently crashes Sven Co-op but the plugin will still work if the respective cvar signature is disabled
+	bind_pcvar_num(g_cvarPluginEnabled, g_bPluginEnabled);
+	bind_pcvar_num(g_cvarSurvivalMode, g_iSurvivalMode);
+	bind_pcvar_num(g_cvarSurvivalMinPlayers, g_iSurvivalMinPlayers);
+	bind_pcvar_float(g_cvarSurvivalStartDelay, g_fSurvivalStartDelay);
+	bind_pcvar_num(g_cvarSurvivalActSpawn, g_bSurvivalActSpawn);
+	bind_pcvar_num(g_cvarTimerMode, g_iTimerMode);
+	bind_pcvar_float(g_cvarTimerAdvance, g_fTimerAdvance);
+	bind_pcvar_num(g_cvarWaveMode, g_iWaveMode);
+	bind_pcvar_num(g_cvarWaveExpMinTime, g_iWaveMinTime);
+	bind_pcvar_float(g_cvarWaveTime, g_fWaveTime);
+	bind_pcvar_float(g_cvarSpawnProtectTime, g_fSpawnProtectTime);
+	bind_pcvar_num(g_cvarSpawnProtectShellThick, g_iSpawnProtectShellThick);
+	#endif
 
-	new bool:bSvenCoopNextmapperRunning = is_plugin_loaded("svencoop_nextmapper.amxx", true) != -1;
+	new bool:bSvenCoopNextmapperRunning = get_cvar_pointer("amx_sven_nextmapper_enabled") > 0;
 
 	if(bSvenCoopNextmapperRunning)
 	{
 		if(g_iPluginFlags & AMX_FLAG_DEBUG)
-			server_print("[DEBUG] %s::plugin_cfg() - Sven Co-op Nextmapper Running");
+			server_print("[DEBUG] %s::plugin_cfg() - Sven Co-op Nextmapper Running", __BINARY__);
 
 		g_cvarPluginSurvStartDelay = get_cvar_pointer("amx_survival_start_delay");
 		g_cvarAntiRushWaitStart = get_cvar_pointer("amx_sven_antirush_wait_start");
@@ -369,19 +415,19 @@ public plugin_cfg()
 		new Float:fNmDelay = get_pcvar_float(g_cvarAntiRushWaitStart);
 
 		if(g_iPluginFlags & AMX_FLAG_DEBUG)
-			server_print("[DEBUG] %s::plugin_cfg() - fThisDelay is %f, fNmDelay is %f", fThisDelay, fNmDelay);
+			server_print("[DEBUG] %s::plugin_cfg() - fThisDelay is %f, fNmDelay is %f", __BINARY__, fThisDelay, fNmDelay);
 
 		if(fThisDelay <= fNmDelay)
 		{
 			if(g_iPluginFlags & AMX_FLAG_DEBUG)
-				server_print("[DEBUG] %s::plugin_cfg() - Native delay less than nextmapper delay, adjusting");
+				server_print("[DEBUG] %s::plugin_cfg() - Native delay less than nextmapper delay, adjusting", __BINARY__);
 
 			g_fSurvivalStartDelay = (fNmDelay + 2.0);
 		}
 	}
 
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::plugin_cfg() - Hooking Events");
+		server_print("[DEBUG] %s::plugin_cfg() - Hooking Events", __BINARY__);
 
 	RegisterHam(Ham_Killed, "player", "Event_PlayerKilled_Post", true);
 	RegisterHam(Ham_Use, "game_end", "Event_GameEnd", false);
@@ -397,13 +443,15 @@ public plugin_cfg()
 
 	RegisterHam(Ham_Use, "trigger_respawn", "Event_SpawnActivation_Post", true);  
 	
+	#if AMXX_VERSION_NUM >= 183
+	//only available in latest versions of AMXX
 	RegisterHam(Ham_SC_EndRevive, "player", "Event_PlayerRevived_Post", true);
 	RegisterHam(Ham_SC_Player_SpecialSpawn, "player", "Event_PlayerRevived_Post", true);
-
 	RegisterHam(Ham_Weapon_SecondaryAttack, "weapon_medkit", "Event_PrepareRevive");
 	RegisterHam(Ham_Weapon_RetireWeapon, "weapon_medkit", "Event_RetireMedkit_Post", true);
+	#endif
 
-	RegisterHam(Ham_Spawn, "player", "Event_PlayerSpawn_Pre", false);
+	RegisterHam(Ham_Spawn, "player", "Event_PlayerSpawn_Pre");
 	RegisterHam(Ham_Spawn, "player", "Event_PlayerSpawn_Post", true);
 
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
@@ -416,16 +464,18 @@ public plugin_cfg()
 	
 	RegisterMonsterHooks();
 
-	set_task(1.0, "Task_ClockFunction", _, _, _, "b");
+	set_task(1.0, "Task_ClockFunction", TASKID_CLOCKFUNCTION, _, _, "b");
 
 	SetupNeededEnts();
 	MapSpecificFixes();
 	ImSureThereAreSpawns();
+
+	
 }
 
 public OnConfigsExecuted()
 {
-	server_print("[NOTICE] %s::OnConfigsExecuted() - %s is free to download and distribute! If you paid for this plugin YOU GOT SCAMMED. Visit https://github.com/szGabu for all my plugins.", __BINARY__, PLUGIN_NAME);
+    server_print("[NOTICE] %s::OnConfigsExecuted() - %s is free to download and distribute! If you paid for this plugin YOU GOT SCAMMED. Visit https://github.com/szGabu for all my plugins.", __BINARY__, PLUGIN_NAME);
 }
 
 MapSpecificFixes()
@@ -450,7 +500,7 @@ ImSureThereAreSpawns()
 {
 	// ok, this is how it works, I'm gonna scan all possible spawn points for AVAILABLE spawn points
 	// meaning spawns players can use
-	g_aAvailableSpawnPoints = ArrayCreate();
+	g_rgAvailableSpawnPoints = ArrayCreate();
 
 	//info_player_start
 	//info_player_deathmatch
@@ -467,7 +517,7 @@ ImSureThereAreSpawns()
 				server_print("[DEBUG] %s::ImSureThereAreSpawns() - Adding %d to possible spawn points.", __BINARY__, iEnt);
 				server_print("[DEBUG] %s::ImSureThereAreSpawns() - pev(iEnt, pev_spawnflags) %d", __BINARY__, pev(iEnt, pev_spawnflags));
 			}
-			ArrayPushCell(g_aAvailableSpawnPoints, iEnt);
+			ArrayPushCell(g_rgAvailableSpawnPoints, iEnt);
 		}
 	}
 
@@ -481,7 +531,7 @@ ImSureThereAreSpawns()
 				server_print("[DEBUG] %s::ImSureThereAreSpawns() - Adding %d to possible spawn points.", __BINARY__, iEnt);
 				server_print("[DEBUG] %s::ImSureThereAreSpawns() - pev(iEnt, pev_spawnflags) %d", __BINARY__, pev(iEnt, pev_spawnflags));
 			}
-			ArrayPushCell(g_aAvailableSpawnPoints, iEnt);
+			ArrayPushCell(g_rgAvailableSpawnPoints, iEnt);
 		}
 	}
 
@@ -495,7 +545,7 @@ ImSureThereAreSpawns()
 				server_print("[DEBUG] %s::ImSureThereAreSpawns() - Adding %d to possible spawn points.", __BINARY__, iEnt);
 				server_print("[DEBUG] %s::ImSureThereAreSpawns() - pev(iEnt, pev_spawnflags) %d", __BINARY__, pev(iEnt, pev_spawnflags));
 			}
-			ArrayPushCell(g_aAvailableSpawnPoints, iEnt);
+			ArrayPushCell(g_rgAvailableSpawnPoints, iEnt);
 		}
 	}
 
@@ -509,12 +559,12 @@ ImSureThereAreSpawns()
 				server_print("[DEBUG] %s::ImSureThereAreSpawns() - Adding %d to possible spawn points.", __BINARY__, iEnt);
 				server_print("[DEBUG] %s::ImSureThereAreSpawns() - pev(iEnt, pev_spawnflags) %d", __BINARY__, pev(iEnt, pev_spawnflags));
 			}
-			ArrayPushCell(g_aAvailableSpawnPoints, iEnt);
+			ArrayPushCell(g_rgAvailableSpawnPoints, iEnt);
 		}
 	}
 
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::ImSureThereAreSpawns() - We have %d possible spawn points.", __BINARY__, ArraySize(g_aAvailableSpawnPoints));
+		server_print("[DEBUG] %s::ImSureThereAreSpawns() - We have %d possible spawn points.", __BINARY__, ArraySize(g_rgAvailableSpawnPoints));
 }
 
 /**
@@ -525,11 +575,11 @@ ImSureThereAreSpawns()
  */
 public SetupNeededEnts()
 {
-	g_hRespawnEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, RESPAWN_ENTNAME));
-	g_hRelayEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, RELAY_ENTNAME));
-	g_hGameOverEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, GAMEOVER_VOTE_ENTNAME));
-	g_hRestartEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, RESTART_ENTNAME));
-	g_hGameEndEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, GAMEEND_ENTNAME));
+	g_hRespawnEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, RESPAWN_CLASSNAME));
+	g_hRelayEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, RELAY_CLASSNAME));
+	g_hGameOverEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, GAMEOVER_VOTE_CLASSNAME));
+	g_hRestartEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, RESTART_CLASSNAME));
+	g_hGameEndEnt = engfunc(EngFunc_CreateNamedEntity, engfunc(EngFunc_AllocString, GAMEEND_CLASSNAME));
 
 	if(!g_hRespawnEnt || !g_hRelayEnt || !g_hGameOverEnt || !g_hRestartEnt || !g_hGameEndEnt || !pev_valid(g_hRespawnEnt) || !pev_valid(g_hRelayEnt) || !pev_valid(g_hGameOverEnt) || !pev_valid(g_hRestartEnt) || !pev_valid(g_hGameEndEnt))
     {
@@ -537,15 +587,16 @@ public SetupNeededEnts()
         set_fail_state("Failed to create needed ents");
     }
 
-	dllfunc(DLLFunc_Spawn, g_hRespawnEnt);
 	set_pev(g_hRespawnEnt, pev_targetname, RESPAWN_TARGETNAME);
-	set_pev(g_hRespawnEnt, pev_spawnflags, RESPAWN_SPAWNFLAG_DEADONLY | RESPAWN_SPAWNFLAG_DONTMOVE);
+	set_pev(g_hRespawnEnt, pev_spawnflags, SF_RESPAWN_DEADONLY | SF_RESPAWN_DONTMOVE);
+	set_pev(g_hRespawnEnt, pev_flags, pev(g_hRespawnEnt, pev_flags) | FL_CUSTOMENTITY);
+	dllfunc(DLLFunc_Spawn, g_hRespawnEnt);
 
 	
-	dllfunc(DLLFunc_Spawn, g_hRelayEnt);
 	set_pev(g_hRelayEnt, pev_targetname, RELAY_TARGETNAME);
+	set_pev(g_hRelayEnt, pev_flags, pev(g_hRelayEnt, pev_flags) | FL_CUSTOMENTITY);
+	dllfunc(DLLFunc_Spawn, g_hRelayEnt);
 
-	
 	set_pev(g_hGameOverEnt, pev_message, "Game Over^nRestart map?");
 	set_pev(g_hGameOverEnt, pev_frags, 20.0); //20 seconds to vote
 	set_pev(g_hGameOverEnt, pev_health, 60.0); //60% needed to continue
@@ -553,15 +604,18 @@ public SetupNeededEnts()
 	set_pev(g_hGameOverEnt, pev_netname, GAMEEND_TARGETNAME);
 	set_pev(g_hGameOverEnt, pev_noise, GAMEEND_TARGETNAME);
 	set_pev(g_hGameOverEnt, pev_targetname, GAMEOVER_VOTE_TARGETNAME);
+	set_pev(g_hGameOverEnt, pev_flags, pev(g_hGameOverEnt, pev_flags) | FL_CUSTOMENTITY);
 	dllfunc(DLLFunc_Spawn, g_hGameOverEnt);
 
 	
 	set_pev(g_hRestartEnt, pev_targetname, RESTART_TARGETNAME);
+	set_pev(g_hRestartEnt, pev_flags, pev(g_hRestartEnt, pev_flags) | FL_CUSTOMENTITY);
+	RegisterHam(Ham_Use, RESTART_CLASSNAME, "Event_RestartVoteOption_Use", true);
 	dllfunc(DLLFunc_Spawn, g_hRestartEnt);
-	RegisterHam(Ham_Use, RESTART_ENTNAME, "Event_RestartVoteOption_Use", true);
 
 	
 	set_pev(g_hGameEndEnt, pev_targetname, GAMEEND_TARGETNAME);
+	set_pev(g_hGameEndEnt, pev_flags, pev(g_hGameEndEnt, pev_flags) | FL_CUSTOMENTITY);
 	dllfunc(DLLFunc_Spawn, g_hGameEndEnt);
 }
 
@@ -590,13 +644,23 @@ public Event_RestartVoteOption_Use(iEnt)
  *
  * @return void
  */
-public client_disconnected(iClient)
+public client_disconnect(iClient)
 {
-	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::client_disconnected() - Called on %N", __BINARY__, iClient);
+	if(!g_bPluginEnabled)
+		return;
 
-	if(g_bPluginEnabled)
-		RequestFrame("Event_PlayerKilled_Post", iClient);
+	if(g_iSurvivalMode == SURVMODE_DISABLED)
+		return;
+
+	set_task(TECHNICAL_IMMEDIATE, "Task_ClientDisconnected_After", TASKID_CLIENTDISCONNECTED_AFTER+iClient);
+}
+
+public Task_ClientDisconnected_After(iTaskId)
+{
+	new iClient = iTaskId - TASKID_CLIENTDISCONNECTED_AFTER;
+
+	//we don't do anything important, we can pass it without validation
+	HandleLossOfPlayer(iClient);
 }
 
 public Event_GameEnd()
@@ -604,6 +668,7 @@ public Event_GameEnd()
 	g_bGameEnded = true;
 }
 
+#if AMXX_VERSION_NUM >= 183
 /**
  * Handles preparation for player revival with medkit.
  * Marks the reviving player as being a valid revival beacon.
@@ -614,11 +679,11 @@ public Event_GameEnd()
  */
 public Event_PrepareRevive(iWeaponId)
 {
-	if(g_bPluginEnabled)
-	{
-		new iClient = get_pdata_ehandle(iWeaponId, m_pPlayer, g_iUnixDiff);
-		g_bIsValidReviveBeacon[iClient] = true;
-	}
+	if(!g_bPluginEnabled)
+		return;
+	
+	new iClient = get_pdata_ehandle(iWeaponId, m_pPlayer, g_iUnixDiff);
+	g_bIsValidReviveBeacon[iClient] = true;
 }
 
 /**
@@ -631,12 +696,13 @@ public Event_PrepareRevive(iWeaponId)
  */
 public Event_RetireMedkit_Post(iWeaponId)
 {
-	if(g_bPluginEnabled)
-	{
-		new iClient = get_pdata_ehandle(iWeaponId, m_pPlayer, g_iUnixDiff);
-		g_bIsValidReviveBeacon[iClient] = false;
-	}
+	if(!g_bPluginEnabled)
+		return;
+
+	new iClient = get_pdata_ehandle(iWeaponId, m_pPlayer, g_iUnixDiff);
+	g_bIsValidReviveBeacon[iClient] = false;
 }
+#endif
 
 /**
  * Handles new player connections.
@@ -663,11 +729,18 @@ public client_putinserver(iClient)
  */
 CheckReinforcementConditions()
 {
-	if(GetPlayerCount(1) > 0 && g_bPluginEnabled)
+	#if AMXX_VERSION_NUM < 183
+	new iAlivePlayers = get_playersnum2(true);
+	new iDeadPlayers = get_playersnum2(false);
+	#else
+	new iAlivePlayers = get_playersnum_ex(GetPlayers_ExcludeDead);
+	new iDeadPlayers = get_playersnum_ex(GetPlayers_ExcludeAlive);
+	#endif
+	if(iAlivePlayers > 0 && g_bPluginEnabled)
 	{
-		if(g_iSurvivalMode == SURVMODE_WAVES && !g_bWaveIncoming && GetPlayerCount(2) > 0)
+		if(g_iSurvivalMode == SURVMODE_WAVES && !g_bWaveIncoming && iDeadPlayers > 0)
 		{
-			if(!task_exists(INITIALREINF_TASKID) || !g_bAllDead)
+			if(!task_exists(TASKID_INITIALREINFORCEMENTS) || !g_bAllDead)
 			{
 				switch(g_iWaveMode)
 				{
@@ -677,11 +750,11 @@ CheckReinforcementConditions()
 					}
 					case WAVEMODE_PERPLAYER:
 					{
-						g_iRespawnTimeLeft = floatround(g_fWaveTime*(GetPlayerCount(0)));
+						g_iRespawnTimeLeft = floatround(g_fWaveTime*(iAlivePlayers+iDeadPlayers));
 					}
 					case WAVEMODE_EXPONENTIAL:
 					{
-						new iPlayerCount = GetPlayerCount(0);
+						new iPlayerCount = iAlivePlayers+iDeadPlayers;
 						new Float:fBaseTime = g_fWaveTime; 
 
 						g_iRespawnTimeLeft = 0;
@@ -697,7 +770,7 @@ CheckReinforcementConditions()
 					}
 				}
 				g_bWaveIncoming = true;
-				set_task(10.0, "CallForReinforcements", INITIALREINF_TASKID);
+				set_task(10.0, "CallForReinforcements", TASKID_INITIALREINFORCEMENTS);
 			}
 		}
 	}
@@ -710,20 +783,29 @@ CheckReinforcementConditions()
  * @param iClient Index of killed player
  *
  * @return HAM_IGNORED Continue normal execution
- *
- * @note `client_disconnected()` also calls this
  */
 public Event_PlayerKilled_Post(iClient)
 {
 	if(!g_bPluginEnabled)
-		return HAM_IGNORED;
+		return;
 
 	if(g_iSurvivalMode == SURVMODE_DISABLED)
-		return HAM_IGNORED;
+		return;
+		
+	HandleLossOfPlayer(iClient);
+}
+
+HandleLossOfPlayer(iClient)
+{
+	if(!g_bPluginEnabled)
+		return;
+
+	if(g_iSurvivalMode == SURVMODE_DISABLED)
+		return;
 
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
 	{
-		if(is_user_connected(iClient))
+		if(is_user_connected2(iClient))
 			server_print("[DEBUG] %s::Event_PlayerKilled_Post() - Called on %N", __BINARY__, iClient);
 		else
 			server_print("[DEBUG] %s::Event_PlayerKilled_Post() - Called on Player %d (Disconnected)", __BINARY__, iClient);
@@ -736,7 +818,11 @@ public Event_PlayerKilled_Post(iClient)
 		if(g_iPluginFlags & AMX_FLAG_DEBUG)
 			server_print("[DEBUG] %s::Event_PlayerKilled_Post() - Survival is enabled", __BINARY__);
 
-		new iAlivePlayers = GetPlayerCount(1);
+		#if AMXX_VERSION_NUM < 183
+		new iAlivePlayers = get_playersnum2(true);
+		#else
+		new iAlivePlayers = get_playersnum_ex(GetPlayers_ExcludeDead);
+		#endif
 
 		if(g_iPluginFlags & AMX_FLAG_DEBUG)
 			server_print("[DEBUG] %s::Event_PlayerKilled_Post() - iAlivePlayers is %d", __BINARY__, iAlivePlayers);
@@ -748,14 +834,11 @@ public Event_PlayerKilled_Post(iClient)
 
 			client_print(0, print_chat, "No more players alive. Game over.");
 			g_bAllDead = true;
-			set_task(5.0, "TriggerVoteEntity");
+			set_task(5.0, "TriggerVoteEntity", TASKID_TRIGGERVOTEENTITY);
 		}
 		else 
 			CheckReinforcementConditions();
 	}
-	
-	//we shouldnt really need to stop this event from happening
-	return HAM_IGNORED;
 }
 
 /**
@@ -788,12 +871,12 @@ public Event_GetDamagePoints_Post(iMonster, iAttacker, iInflictor, Float:fDamage
 	{
 		g_bDamagedRecently = true;
 		
-		if(!task_exists(REINFORCEMENT_COOLDOWN_TASKID))
-			set_task(g_fTimerAdvance, "Task_ReinforcementCooldown", REINFORCEMENT_COOLDOWN_TASKID);
+		if(!task_exists(TASKID_REINFORCEMENTCOOLDOWN))
+			set_task(g_fTimerAdvance, "Task_ReinforcementCooldown", TASKID_REINFORCEMENTCOOLDOWN);
 		else
 		{
-			remove_task(REINFORCEMENT_COOLDOWN_TASKID);
-			set_task(g_fTimerAdvance, "Task_ReinforcementCooldown", REINFORCEMENT_COOLDOWN_TASKID);
+			remove_task(TASKID_REINFORCEMENTCOOLDOWN);
+			set_task(g_fTimerAdvance, "Task_ReinforcementCooldown", TASKID_REINFORCEMENTCOOLDOWN);
 		}
 	}
 }
@@ -820,28 +903,38 @@ public Event_SpawnActivation_Pre(iSpawnPoint)
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
 	{
 		server_print("[DEBUG] %s::Event_SpawnActivation_Pre() - Called on %d (%s)", __BINARY__, iSpawnPoint, szTargetName);
-		server_print("[DEBUG] %s::Event_SpawnActivation_Pre() - We have %d possible spawn points.", __BINARY__, ArraySize(g_aAvailableSpawnPoints));
+		server_print("[DEBUG] %s::Event_SpawnActivation_Pre() - We have %d possible spawn points.", __BINARY__, ArraySize(g_rgAvailableSpawnPoints));
 	}
 
-	new iSPIndex = ArrayFindValue(g_aAvailableSpawnPoints, iSpawnPoint);
+	#if AMXX_VERSION_NUM < 183
+	new iSpawnPointIndex = -1;
+	new iArraySize = ArraySize(g_rgAvailableSpawnPoints);
+	for(new iIndex = 0; iIndex < iArraySize; iIndex++)
+	{
+		if(iSpawnPoint == ArrayGetCell(g_rgAvailableSpawnPoints, iIndex))
+			iSpawnPointIndex = iIndex;
+	}
+	#else
+	new iSpawnPointIndex = ArrayFindValue(g_rgAvailableSpawnPoints, iSpawnPoint);
+	#endif
 
-	if(ArrayFindValue(g_aAvailableSpawnPoints, iSpawnPoint) == -1)
+	if(iSpawnPointIndex == -1)
 	{
 		if(g_iPluginFlags & AMX_FLAG_DEBUG)
 			server_print("[DEBUG] %s::Event_SpawnActivation_Pre() - %d didn't exist in the spawns, adding it. (it was activated)", __BINARY__, iSpawnPoint);
-		ArrayPushCell(g_aAvailableSpawnPoints, iSpawnPoint);
+		ArrayPushCell(g_rgAvailableSpawnPoints, iSpawnPoint);
 	}
 	else 
 	{
 		if(g_iPluginFlags & AMX_FLAG_DEBUG)
 			server_print("[DEBUG] %s::Event_SpawnActivation_Pre() - %d existed in spawns, removing it. (it was deactivated)", __BINARY__, iSpawnPoint);
-		ArrayDeleteItem(g_aAvailableSpawnPoints, iSPIndex);
+		ArrayDeleteItem(g_rgAvailableSpawnPoints, iSpawnPointIndex);
 	}
 
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::Event_SpawnActivation_Pre() - We have %d possible spawn points.", __BINARY__, ArraySize(g_aAvailableSpawnPoints));
+		server_print("[DEBUG] %s::Event_SpawnActivation_Pre() - We have %d possible spawn points.", __BINARY__, ArraySize(g_rgAvailableSpawnPoints));
 
-	if(ArraySize(g_aAvailableSpawnPoints) == 0)
+	if(ArraySize(g_rgAvailableSpawnPoints) == 0)
 	{
 		//no more spawns
 		//saving last activation to create emergency spawns
@@ -849,10 +942,10 @@ public Event_SpawnActivation_Pre(iSpawnPoint)
 		if(g_iPluginFlags & AMX_FLAG_DEBUG)
 			server_print("[DEBUG] %s::Event_SpawnActivation_Pre() - No more spawns, activating emergency spawns.", __BINARY__);
 			
-		pev(iSpawnPoint, pev_targetname, g_szSpawnPointLastAvailableTargetName, charsmax(g_szSpawnPointLastAvailableTargetName));
+		pev(iSpawnPoint, pev_targetname, g_szSpawnPointLastTargetName, charsmax(g_szSpawnPointLastTargetName));
 
 		new iEnt = 0;
-		while((iEnt = find_ent_by_tname(iEnt, g_szSpawnPointLastAvailableTargetName)))
+		while((iEnt = find_ent_by_tname(iEnt, g_szSpawnPointLastTargetName)))
 		{
 			if(pev_valid(iEnt))
 			{
@@ -898,7 +991,7 @@ public Event_SpawnActivation_Post()
 	{
 		g_bInfoActivated = true;
 		RespawnAllPlayers();
-		set_task(1.0, "Task_InfoActivatedCooldown");
+		set_task(1.0, "Task_InfoActivatedCooldown", TASKID_INFOACTIVATEDCOOLDOWN);
 	}
 }
 
@@ -921,10 +1014,18 @@ public Task_InfoActivatedCooldown()
  */
 public Task_ClockFunction()
 {
-	if(!g_bPluginEnabled || !g_bSurvivalEnabled || g_iSurvivalMode != SURVMODE_WAVES || !g_bWaveIncoming || task_exists(INITIALREINF_TASKID) || g_bAllDead)
+	if(!g_bPluginEnabled || !g_bSurvivalEnabled || g_iSurvivalMode != SURVMODE_WAVES || !g_bWaveIncoming || task_exists(TASKID_INITIALREINFORCEMENTS) || g_bAllDead)
         return;
 
-	if(GetPlayerCount(2) == 0 || GetPlayerCount(1) == 0)
+	#if AMXX_VERSION_NUM < 183
+	new iAlivePlayers = get_playersnum2(true);
+	new iDeadPlayers = get_playersnum2(false);
+	#else
+	new iAlivePlayers = get_playersnum_ex(GetPlayers_ExcludeDead);
+	new iDeadPlayers = get_playersnum_ex(GetPlayers_ExcludeAlive);
+	#endif
+
+	if(iDeadPlayers == 0 || iAlivePlayers == 0)
 	{
 		g_bWaveIncoming = false;
 		return;
@@ -968,7 +1069,13 @@ public CallForReinforcements()
 	if(!g_bPluginEnabled || g_iSurvivalMode == SURVMODE_DISABLED || !g_bSurvivalEnabled || g_bAllDead)
         return;
 
-	if(GetPlayerCount(2) >= 1)
+	#if AMXX_VERSION_NUM < 183
+	new iDeadPlayers = get_playersnum2(false);
+	#else
+	new iDeadPlayers = get_playersnum_ex(GetPlayers_ExcludeAlive);
+	#endif
+
+	if(iDeadPlayers >= 1)
 		client_print(0, print_chat, "Reinforcements will arrive in %i seconds!", g_iRespawnTimeLeft);
 	else
 		g_bWaveIncoming = false;
@@ -987,7 +1094,13 @@ public ReinforcementsArrived()
 
 	if(!g_bAllDead && g_bWaveIncoming)
 	{
-		if(GetPlayerCount(2) > 0)
+		#if AMXX_VERSION_NUM < 183
+		new iDeadPlayers = get_playersnum2(false);
+		#else
+		new iDeadPlayers = get_playersnum_ex(GetPlayers_ExcludeAlive);
+		#endif
+		
+		if(iDeadPlayers > 0)
 		{
 			client_print(0, print_chat, "Reinforcements have arrived!");
 			RespawnAllPlayers();
@@ -1002,9 +1115,11 @@ public Event_PlayerSpawn_Pre(iClient)
         return HAM_IGNORED;
 
 	if(g_bAllDead)
-		return HAM_SUPERCEDE;
-	else 
-		return HAM_IGNORED;
+		return HAM_SUPERCEDE; //prevent spawns if players are dead.
+	
+	//this seems unsafe, we should probably abort the vote somehow and let them spawn to continue playing?
+	
+	return HAM_IGNORED;
 }
 
 /**
@@ -1017,84 +1132,34 @@ public Event_PlayerSpawn_Pre(iClient)
  */
 public Event_PlayerSpawn_Post(iClient)
 {
-	if(!g_bPluginEnabled || g_iSurvivalMode == SURVMODE_DISABLED)
+	if(!g_bPluginEnabled || g_iSurvivalMode == SURVMODE_DISABLED || !iClient)
 		return HAM_IGNORED;
 
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-	{
 		server_print("[DEBUG] %s::Event_PlayerSpawn_Post() - Called on %N", __BINARY__,  iClient);
-		server_print("[DEBUG] %s::Event_PlayerSpawn_Post() - g_bPluginEnabled is %b", __BINARY__,  g_bPluginEnabled);
-		server_print("[DEBUG] %s::Event_PlayerSpawn_Post() - g_iSurvivalMode is %d", __BINARY__,  g_iSurvivalMode);
-		server_print("[DEBUG] %s::Event_PlayerSpawn_Post() - is_user_alive(iClient) is %d", __BINARY__,  is_user_alive(iClient));
-	}
 
-	//first spawn always considers player as dead (even in a post hook!)
+	//first spawn always considers player as dead (even in a post hook!), also functions like playercounts will return 0
 	//so, for safety we will execute our logic in a little while after
-	set_task(0.1, "Event_PlayerSpawn_Post_After", get_user_userid(iClient));
-
+	set_task(TECHNICAL_IMMEDIATE, "Event_PlayerSpawn_Post_After", TASKID_PLAYERSPAWN_POST_AFTER+get_user_userid(iClient));
 	return HAM_IGNORED;
 }
 
-public Event_PlayerSpawn_Post_After(iUserId)
+public Event_PlayerSpawn_Post_After(iTaskId)
 {
-	if(!g_bPluginEnabled || g_iSurvivalMode == SURVMODE_DISABLED)
+	new iUserId = iTaskId - TASKID_PLAYERSPAWN_POST_AFTER;
+
+	if(!iUserId)
 		return;
 
 	new iClient = find_player_ex(FindPlayer_MatchUserId, iUserId);
 
-	if(!iClient || !is_user_alive(iClient))
+	if(!iClient || !is_user_connected2(iClient) || !is_user_alive(iClient))
 		return; 
 
 	SurvivalActivateNow();
 
-	if(g_fSpawnProtectionTime > 0.0) 
-		RequestFrame("SpawnProtectEnable", iClient);
-
-	return;
-}
-
-SurvivalActivateNow()
-{
-	if(g_iSurvivalMode != SURVMODE_DISABLED)
-	{
-		if(!g_bSurvivalEnabled && GetPlayerCount(0) >= g_iSurvivalMinPlayers)
-		{
-			if(!task_exists(ENABLESURV_TASKID))
-			{
-				if(g_iPluginFlags & AMX_FLAG_DEBUG)
-					server_print("[DEBUG] %s::Event_PlayerSpawn_Post() - I want to enable survival mode", __BINARY__);
-					
-				new iEnableSurvivalTime = floatround(g_fSurvivalStartDelay);
-				client_print(0, print_chat, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
-				server_print("Enabling survival mode in %d seconds", iEnableSurvivalTime);
-				client_print(0, print_center, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
-				set_task(g_fSurvivalStartDelay, "EnableSurvival", ENABLESURV_TASKID);
-			}
-		}
-		else if(!g_bSurvivalEnabled)
-		{
-			client_print(0, print_chat, "Not enough players to activate survival mode. Minimum %d", g_iSurvivalMinPlayers);
-
-			if(task_exists(ENABLESURV_TASKID))
-				remove_task(ENABLESURV_TASKID);
-		}
-	}
-}
-
-/**
- * Enables survival mode.
- * Sets up necessary game settings and notifies players.
- *
- * @return void
- */
-public EnableSurvival()
-{
-	RespawnAllPlayers();
-	client_print(0, print_chat, "Survival mode enabled. No more respawning allowed!");
-	client_print(0, print_center, "Survival mode enabled.^nNo more respawning allowed!");
-	set_pcvar_bool(g_cvarObserverMode, true);
-	set_pcvar_bool(g_cvarObserverCyclic, true);
-	g_bSurvivalEnabled = true;
+	if(g_fSpawnProtectTime > 0.0) 
+		SpawnProtectEnable(iClient);
 }
 
 /**
@@ -1105,11 +1170,79 @@ public EnableSurvival()
  *
  * @return void
  */
-public SpawnProtectEnable(iClient) // This is the function for the task_on godmode
+public SpawnProtectEnable(iClient)
 {
-   set_user_godmode(iClient, 1);
-   set_user_rendering(iClient, kRenderFxGlowShell, 255, 255, 255, kRenderNormal, g_iSpawnProtectionShellThickness);
-   set_task(g_fSpawnProtectionTime, "Task_SpawnProtectDisable", SPAWN_PROTECT_TASKID+iClient);
+	if(is_user_connected2(iClient) && is_user_alive(iClient))
+	{
+		set_user_godmode(iClient, 1);
+		set_user_rendering(iClient, kRenderFxGlowShell, 255, 255, 255, kRenderNormal, g_iSpawnProtectShellThick);
+		set_task(g_fSpawnProtectTime, "Task_SpawnProtectDisable", TASKID_SPAWNPROTECT+iClient);
+	}
+}
+
+SurvivalActivateNow()
+{
+	if(g_iSurvivalMode != SURVMODE_DISABLED)
+	{
+		#if AMXX_VERSION_NUM < 183
+		new iPlayersNum = get_playersnum();
+		#else
+		new iPlayersNum = get_playersnum_ex();
+		#endif
+		if(g_iPluginFlags & AMX_FLAG_DEBUG)
+		{
+			server_print("[DEBUG] %s::SurvivalActivateNow() - g_iSurvivalMode is %d", __BINARY__, g_iSurvivalMode);
+			server_print("[DEBUG] %s::SurvivalActivateNow() - g_iSurvivalMinPlayers is %d", __BINARY__, g_iSurvivalMinPlayers);
+			server_print("[DEBUG] %s::SurvivalActivateNow() - iPlayersNum is %d", __BINARY__, iPlayersNum);
+			server_print("[DEBUG] %s::SurvivalActivateNow() - g_bSurvivalEnabled is %b", __BINARY__, g_bSurvivalEnabled);
+		}
+
+		if(!g_bSurvivalEnabled && iPlayersNum >= g_iSurvivalMinPlayers)
+		{
+			if(!task_exists(TASKID_ENABLESURVIVAL))
+			{
+				if(g_iPluginFlags & AMX_FLAG_DEBUG)
+					server_print("[DEBUG] %s::SurvivalActivateNow() - I want to enable survival mode", __BINARY__);
+					
+				new iEnableSurvivalTime = floatround(g_fSurvivalStartDelay);
+				client_print(0, print_chat, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
+				server_print("Enabling survival mode in %d seconds", iEnableSurvivalTime);
+				client_print(0, print_center, "Enabling survival mode in %d seconds", iEnableSurvivalTime);
+				set_task(g_fSurvivalStartDelay, "Task_EnableSurvival", TASKID_ENABLESURVIVAL);
+			}
+		}
+		else if(!g_bSurvivalEnabled)
+		{
+			client_print(0, print_chat, "Not enough players to activate survival mode. Minimum %d", g_iSurvivalMinPlayers);
+
+			if(task_exists(TASKID_ENABLESURVIVAL))
+				remove_task(TASKID_ENABLESURVIVAL);
+		}
+	}
+}
+
+/**
+ * Enables survival mode.
+ * Sets up necessary game settings and notifies players.
+ *
+ * @return void
+ */
+public Task_EnableSurvival()
+{
+	#if AMXX_VERSION_NUM < 183
+	new iPlayersNum = get_playersnum();
+	#else
+	new iPlayersNum = get_playersnum_ex();
+	#endif
+	if(iPlayersNum > 0)
+	{
+		RespawnAllPlayers();
+		client_print(0, print_chat, "Survival mode enabled. No more respawning allowed!");
+		client_print(0, print_center, "Survival mode enabled.^nNo more respawning allowed!");
+		set_pcvar_bool(g_cvarObserverMode, true);
+		set_pcvar_bool(g_cvarObserverCyclic, true);
+		g_bSurvivalEnabled = true;
+	}
 }
 
 /**
@@ -1122,8 +1255,8 @@ public SpawnProtectEnable(iClient) // This is the function for the task_on godmo
  */
 public Task_SpawnProtectDisable(iTaskId) 
 {
-	new iClient = iTaskId-SPAWN_PROTECT_TASKID;
-	if(!is_user_connected(iClient))
+	new iClient = iTaskId-TASKID_SPAWNPROTECT;
+	if(!is_user_connected2(iClient))
 		return;
 	else
 	{
@@ -1132,6 +1265,7 @@ public Task_SpawnProtectDisable(iTaskId)
 	}
 }
 
+#if AMXX_VERSION_NUM >= 183
 /**
  * Post-hook for player revival events. Handles revival location adjustment and spawn protection.
  *
@@ -1145,14 +1279,20 @@ public Task_SpawnProtectDisable(iTaskId)
 public Event_PlayerRevived_Post(iClient)
 {
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-		server_print("[DEBUG] %s::Event_PlayerRevived_Post() - Called on %N", __BINARY__, iClient);
+		server_print("[DEBUG] %s::Event_PlayerRevived_Post() - Called on client %d", __BINARY__, iClient);
 
-	if(GetPlayerCount(2) == 0)
+	#if AMXX_VERSION_NUM < 183
+	new iDeadPlayers = get_playersnum2(false);
+	#else
+	new iDeadPlayers = get_playersnum_ex(GetPlayers_ExcludeAlive);
+	#endif
+
+	if(iDeadPlayers == 0)
 		g_bWaveIncoming = false;
 
-	if(g_fSpawnProtectionTime > 0.0)
+	if(g_fSpawnProtectTime > 0.0)
 	{
-		if(pev_valid(iClient) && !task_exists(SPAWN_PROTECT_TASKID+iClient))
+		if(pev_valid(iClient) && !task_exists(TASKID_SPAWNPROTECT+iClient))
 		{
 			new Float:fPlayerOrigin[3];
 			new iOther = -1;
@@ -1171,7 +1311,7 @@ public Event_PlayerRevived_Post(iClient)
 				new Float:fOtherOrigin[3];
 				pev(iOther, pev_origin, fOtherOrigin);
 				set_pev(iClient, pev_origin, fOtherOrigin);
-				set_task(0.5, "Task_UnstuckPlayer", UNSTUCK_TASKID+iClient);
+				set_task(0.5, "Task_UnstuckPlayer", TASKID_UNSTUCK+iClient);
 				break;
 			}
 			SpawnProtectEnable(iClient);
@@ -1180,6 +1320,7 @@ public Event_PlayerRevived_Post(iClient)
 
 	return HAM_IGNORED;
 }
+#endif
 
 /**
  * Timer task to unstuck players after teleportation.
@@ -1191,8 +1332,8 @@ public Event_PlayerRevived_Post(iClient)
  */
 public Task_UnstuckPlayer(iTaskId)
 {
-	new iClient = iTaskId-UNSTUCK_TASKID;
-	if(is_user_connected(iClient) && is_user_alive(iClient) && pev_valid(iClient)) 
+	new iClient = iTaskId-TASKID_UNSTUCK;
+	if(is_user_connected2(iClient) && is_user_alive(iClient)) 
 	{
 		static Float:fClientOrigin[3], iHullType;
 		static Float:fClientMins[3];
@@ -1246,8 +1387,14 @@ public Command_RespawnDeadPlayers(iClient, iLevel, iCommandId)
 
 	if (!cmd_access(iClient, iLevel, iCommandId, 1))
 		return PLUGIN_HANDLED;
-		
-	if(GetPlayerCount(2) == 0)
+
+	#if AMXX_VERSION_NUM < 183
+	new iDeadPlayers = get_playersnum2(false);
+	#else
+	new iDeadPlayers = get_playersnum_ex(GetPlayers_ExcludeAlive);
+	#endif
+
+	if(iDeadPlayers == 0)
 	{
 		client_print(iClient, print_console, "There's no one to respawn.^n");
 		return PLUGIN_HANDLED;
@@ -1262,17 +1409,6 @@ public Command_RespawnDeadPlayers(iClient, iLevel, iCommandId)
 
 public Command_SurvivalActivateNow(iClient, iLevel, iCommandId)
 {
-	if(g_iPluginFlags & AMX_FLAG_DEBUG)
-	{
-		server_print("[DEBUG] %s::Command_SurvivalActivateNow() - Called", __BINARY__);
-		server_print("[DEBUG] %s::Command_SurvivalActivateNow() - iClient is %d", __BINARY__, iClient);
-		server_print("[DEBUG] %s::Command_SurvivalActivateNow() - iLevel is %d", __BINARY__, iLevel);
-		server_print("[DEBUG] %s::Command_SurvivalActivateNow() - iCommandId is %d", __BINARY__, iCommandId);
-	}
-
-	if(iClient == 0 || iLevel == -520167424 || iCommandId == 0)
-		return PLUGIN_HANDLED;
-
 	if (!cmd_access(iClient, iLevel, iCommandId, 1))
 		return PLUGIN_HANDLED;
 
@@ -1315,46 +1451,6 @@ bool:IsHullVacant(const Float:fOrigin[3], iHull, iClient)
 }
 
 /**
- * Counts players based on specified criteria. It was made on response of native get_playernum() natives
- * not working correctly and reporting incorrect data.
- *
- * @param iType Player type to count:
- *              0 = All players
- *              1 = Living players only
- *              2 = Dead players only
- *
- * @return int Number of matching players
- */
-GetPlayerCount(iType)
-{
-	new iCount = 0;
-	for(new iClient=1;iClient <= MaxClients;iClient++)
-	{
-		if(is_user_connected(iClient))
-		{
-			switch(iType)
-			{
-				case 1:
-				{
-					if(is_user_alive(iClient))
-						iCount++;
-				}
-				case 2:
-				{
-					if(!is_user_alive(iClient))
-						iCount++;
-				}
-				default:
-				{
-					iCount++;
-				}
-			}
-		}
-	}
-	return iCount;
-}
-
-/**
  * Registers damage event hooks for all monster entities.
  * Used to track combat activity for timer advancement.
  *
@@ -1365,6 +1461,36 @@ RegisterMonsterHooks()
 	if(g_iPluginFlags & AMX_FLAG_DEBUG)
 		server_print("[DEBUG] %s::RegisterMonsterHooks() - Called", __BINARY__);
 
+	#if AMXX_VERSION_NUM < 183
+	for(new iCursor; iCursor < sizeof g_szMonsterList; iCursor++)
+		RegisterHam(Ham_TakeDamage, g_szMonsterList[iCursor], "Event_GetDamagePoints_Post", true);
+	#else 
 	for(new iCursor; iCursor < sizeof g_szMonsterList; iCursor++)
 		RegisterHam(Ham_SC_GetDamagePoints, g_szMonsterList[iCursor], "Event_GetDamagePoints_Post", true);
+	#endif
+}
+
+#if AMXX_VERSION_NUM < 183
+stock get_playersnum2(bool:bAlive)
+{
+    new iCount = 0;
+    for(new iClient=1; iClient <= MaxClients;iClient++)
+    {
+        if(is_user_connected2(iClient) && ( (bAlive && is_user_alive(iClient)) || (!bAlive && !is_user_alive(iClient)) ))
+            iCount++;
+    }
+    return iCount;
+}
+#endif
+
+stock bool:is_user_connected2(iClient)
+{
+    #if AMXX_VERSION_NUM < 183
+    return is_user_connected(iClient) == 1;
+    #else
+    if(IsValidUserIndex(iClient) && pev_valid(iClient) == 2)
+        return bool:ExecuteHam(Ham_SC_Player_IsConnected, iClient);
+    else
+        return false;
+    #endif
 }
